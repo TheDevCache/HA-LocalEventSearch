@@ -38,7 +38,9 @@ from .const import (
     SIGNAL_UPDATE,
     VERSION,
 )
+from .scout import reports as report_lib
 from .scout.dates import in_window, parse_event_time
+from .scout.geo import Geocoder
 from .scout.models import DEFAULT_BUCKET_ID, DEFAULT_BUCKETS, PRIORITIES, Bucket, Interest, Location, Profile, Source, to_dict
 from .scout.openrouter import OpenRouterClient, OpenRouterError
 from .scout.pipeline import ScoutPipeline, find_duplicate
@@ -51,6 +53,8 @@ CONFIG_VERSION = 2
 RESULTS_VERSION = 2
 SPEND_REFRESH = timedelta(hours=6)
 MAX_FEEDBACK = 100
+MAX_REPORTS = 200
+SOURCE_REPORT_PAUSE = 3  # auto-added sources are paused after this many events from them were reported wrong
 MAX_RUN_HISTORY = 60
 MAX_SOURCES = 40
 MAX_AUTO_SOURCES = 30
@@ -92,6 +96,7 @@ def _empty_results() -> dict[str, Any]:
         "bucket_searched": {},
         "interest_searched": {},
         "sources": [],
+        "reports": [],  # what users said was wrong; outlives the events (see scout/reports.py)
         "geocode_cache": {},
         "gemini_search_api": "auto",  # which Gemini request style actually searches with this key
         "spend": None,
@@ -330,6 +335,8 @@ class EventScoutCoordinator:
             "config": self.config,
             "events": self.upcoming_events(),
             "sources": self.results["sources"],
+            "reports": self.results["reports"][-30:],
+            "problems": report_lib.PROBLEMS,
             "last_run": self.results.get("last_run"),
             "status": self.status,
             "scanning": self.scanning,
@@ -374,6 +381,8 @@ class EventScoutCoordinator:
         if event is None:
             raise KeyError(event_id)
         event["status"] = "new" if verdict == "clear" else verdict
+        if verdict == "clear":
+            event.pop("hidden_reason", None)
         log = [f for f in self.results["feedback"] if f.get("id") != event_id]
         if verdict in ("like", "dislike"):
             log.append(
@@ -391,6 +400,48 @@ class EventScoutCoordinator:
         await self._results_store.async_save(self.results)
         self._notify()
         return self.public_state()
+
+    async def async_report(self, event_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Apply a user's report that an event's details are wrong (or undo it)."""
+        event = self.results["events"].get(event_id)
+        if event is None:
+            raise KeyError(event_id)
+        log: list[dict[str, Any]] = self.results["reports"]
+        source = self._find_source(event["source_url"]) if event.get("source_url") else None
+        if body.get("undo"):
+            had_reports = bool(event.get("reports"))
+            report_lib.undo_report(event)
+            self.results["reports"] = [r for r in log if r["event_id"] != event_id]
+            if source and had_reports:
+                source["reports"] = max(0, source.get("reports", 0) - 1)
+            message = "Report undone."
+        else:
+            problem = str(body.get("problem") or "")
+            note = str(body.get("note") or "")
+            correction = body.get("correction") if isinstance(body.get("correction"), dict) else {}
+            when = dt_util.utcnow().isoformat()
+            changed = report_lib.apply_report(
+                event, problem, correction, note, dt_util.get_default_time_zone(), when
+            )
+            notes = []
+            if problem == "location" and {"town", "venue", "address"} & set(changed):
+                profile = self.profile()
+                geocoder = Geocoder(async_get_clientsession(self.hass), self.results["geocode_cache"])
+                notes.append(await report_lib.relocate(event, geocoder, profile.locations, profile.bucket(event["bucket"])))
+            log.append(report_lib.log_entry(event, problem, changed, report_lib.clean_str(note, 300), when))
+            self.results["reports"] = log[-MAX_REPORTS:]
+            if source and len(event["reports"]) == 1:
+                source["reports"] = source.get("reports", 0) + 1
+                if source["origin"] != "manual" and source["reports"] >= SOURCE_REPORT_PAUSE and source["enabled"]:
+                    source["enabled"] = False
+                    source["paused_reason"] = f"{source['reports']} events from this page were reported wrong"
+                    notes.append(f"Paused the saved source {source['name']}: {source['paused_reason']}.")
+            if event.get("hidden_reason") and event.get("status") == "dismiss" and problem != "location":
+                notes.append("It's hidden now; you'll find it under Hidden.")
+            message = " ".join(["Thanks, report saved.", *notes])
+        await self._results_store.async_save(self.results)
+        self._notify()
+        return self.public_state() | {"message": message}
 
     def _feedback_examples(self, verdict: str) -> list[str]:
         return [
@@ -687,6 +738,7 @@ class EventScoutCoordinator:
                 known_events=self._known_events(),
                 interest_last_searched=self.results["interest_searched"],
                 unscored=self._unscored(),
+                corrections=report_lib.hints(self.results["reports"]),
                 progress=_progress,
             )
             if isinstance(llm, GeminiProvider) and llm.search_api in GeminiProvider.SEARCH_APIS:
@@ -769,14 +821,24 @@ class EventScoutCoordinator:
     def _merge_events(self, events: list[dict[str, Any]]) -> int:
         """Add new events and refresh known ones. Nothing is removed here (see _prune)."""
         stored: dict[str, dict[str, Any]] = self.results["events"]
+        ghosts = report_lib.ghost_events(self.results["reports"])
         now = dt_util.utcnow().isoformat()
         new = 0
         for event in events:
             existing = stored.get(event["id"]) or find_duplicate(stored, event)
+            if existing is None:
+                # Seen again with the details the user reported as wrong?
+                ghost = find_duplicate(ghosts, event) if ghosts else None
+                if ghost:
+                    existing = stored.get(ghost["id"])
+                    if existing is None:
+                        continue  # reported (e.g. cancelled) and since expired: don't bring it back
             if existing:
                 keep = {k: existing[k] for k in ("id", "status", "first_seen") if k in existing}
                 if event.get("score") is None and existing.get("score") is not None:
                     keep.update(score=existing["score"], why=existing.get("why", ""))
+                if existing.get("reports"):
+                    event = report_lib.reapply(event, existing)
                 existing.clear()
                 existing.update(event | keep | {"last_seen": now})
             else:
@@ -802,6 +864,7 @@ class EventScoutCoordinator:
             if event_time and event_time.last_date >= now.date() - timedelta(days=1):
                 keep[event_id] = event
         self.results["events"] = keep
+        self.results["reports"] = [r for r in self.results["reports"] if not report_lib.expired(r, now)]
         if len(self.results["geocode_cache"]) > 2000:
             self.results["geocode_cache"] = dict(list(self.results["geocode_cache"].items())[-1000:])
 

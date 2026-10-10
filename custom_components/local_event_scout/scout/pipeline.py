@@ -86,6 +86,7 @@ class ScoutPipeline:
         self.geocoder = Geocoder(session, geocode_cache)
         self._check_links = check_links
         self._interests_per_search = max(1, int(interests_per_search))
+        self._corrections: list[str] = []
 
     async def run(
         self,
@@ -101,10 +102,12 @@ class ScoutPipeline:
         known_events: dict[str, list[str]] | None = None,
         interest_last_searched: dict[str, str] | None = None,
         unscored: list[dict[str, Any]] | None = None,
+        corrections: list[str] | None = None,
         progress: Callable[[str], None] | None = None,
     ) -> RunResult:
         """Process ``bucket_ids``: read their saved sources, and web-search those in ``search_bucket_ids``."""
         result = RunResult()
+        self._corrections = list(corrections or [])
         report = progress or (lambda _msg: None)
         today = now.date()
         search_ids = set(bucket_ids if search_bucket_ids is None else search_bucket_ids) & set(bucket_ids)
@@ -253,6 +256,7 @@ class ScoutPipeline:
             dislikes=profile.dislikes,
             max_results=profile.max_results,
             known=known[:MAX_KNOWN_IN_PROMPT],
+            corrections=self._corrections,
         )
         label = f"{bucket.label} near {loc.city}: {', '.join(i.name for i in interests)}"
         return await self._call_for_events("search", label, prompts.SEARCH_SYSTEM, prompt, True, result)
@@ -285,6 +289,7 @@ class ScoutPipeline:
             dislikes=profile.dislikes,
             pages=[(p.url, p.text) for p in pages],
             max_results=max(profile.max_results, 5 * len(pages)),
+            corrections=self._corrections,
         )
         label = f"{bucket.label}: {', '.join(host_of(p.url) for p in pages)}"
         try:

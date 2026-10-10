@@ -63,6 +63,29 @@ function relative(iso) {
   return new Date(iso).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+const REPORT_HINTS = {
+  location: "Leave the town blank if you don't know where it really is; the event will be hidden.",
+  date: "Leave the date blank if you don't know the right one; the event will be hidden.",
+  cancelled: "It will be hidden and won't be added again.",
+  link: "Leave blank if you don't know the right link.",
+  other: "Describe what's wrong. It's passed to future searches.",
+};
+
+function shortWhen(value) {
+  if (!value) return "";
+  return whenText({ start: value, all_day: /^\d{4}-\d{2}-\d{2}$/.test(value) });
+}
+
+// "town: Lethbridge → Edmonton" style summary of what a report changed.
+function changeText(was = {}, now = {}) {
+  const parts = [];
+  if ("town" in was || "town" in now) parts.push(`${esc(was.town || "?")} → ${esc(now.town || "?")}`);
+  else if ("venue" in was || "venue" in now) parts.push(`${esc(was.venue || "?")} → ${esc(now.venue || "?")}`);
+  if ("start" in was || "start" in now) parts.push(`${esc(shortWhen(was.start))} → ${esc(shortWhen(now.start))}`);
+  if (now.url) parts.push("new link");
+  return parts.join(", ");
+}
+
 const money = (value) => (typeof value === "number" ? `$${value.toFixed(2)}` : "–");
 
 class LocalEventScoutPanel extends HTMLElement {
@@ -203,6 +226,8 @@ class LocalEventScoutPanel extends HTMLElement {
       if (e.target.dataset.action === "sort") {
         this._sort = e.target.value;
         this._renderBody();
+      } else if (e.target.dataset.action === "report-problem") {
+        this._showReportFields(e.target.closest("form"));
       } else if (e.target.closest(".settings")) this._markDirty();
     });
   }
@@ -263,6 +288,8 @@ class LocalEventScoutPanel extends HTMLElement {
 
   _renderBody() {
     if (!this._state) return;
+    const form = this.shadowRoot.querySelector("form.report");
+    if (form) this._reportDraft = Object.fromEntries(new FormData(form));
     this.shadowRoot.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === this._tab));
     const body = this.shadowRoot.getElementById("body");
     body.innerHTML = this._tab === "settings" ? this._settingsHtml() : this._eventsHtml();
@@ -354,6 +381,8 @@ class LocalEventScoutPanel extends HTMLElement {
           ${e.why ? `<p class="why">${esc(e.why)}</p>` : ""}
           ${e.weather_note ? `<p class="weather"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon> ${esc(e.weather_note)}</p>` : ""}
           ${e.summary ? `<p class="summary">${esc(e.summary)}</p>` : ""}
+          ${this._reportedHtml(e)}
+          ${hidden && e.hidden_reason ? `<p class="muted small">Hidden: ${esc(e.hidden_reason)}</p>` : ""}
           <div class="meta">
             <span class="tag">${esc(this._bucketLabel(e.bucket))}</span>
             ${e.interest ? `<span class="tag">${e.priority === "high" ? "★ " : ""}${esc(e.interest)}</span>` : ""}
@@ -363,10 +392,112 @@ class LocalEventScoutPanel extends HTMLElement {
             ${action("like", e.status === "like" ? "mdi:thumb-up" : "mdi:thumb-up-outline", "Interested", e.status === "like")}
             ${action("dislike", e.status === "dislike" ? "mdi:thumb-down" : "mdi:thumb-down-outline", "Not for me (teaches future searches)", e.status === "dislike")}
             ${action("dismiss", e.status === "dismiss" ? "mdi:eye-off" : "mdi:eye-off-outline", "Hide (no effect on future searches)", e.status === "dismiss")}
+            <button class="icon ${this._reporting === e.id ? "on" : ""}" title="Report wrong info" data-action="report-open" data-id="${esc(e.id)}">
+              <ha-icon icon="${(e.reports || []).length ? "mdi:flag" : "mdi:flag-outline"}"></ha-icon></button>
             </span>
           </div>
+          ${this._reporting === e.id ? this._reportFormHtml(e) : ""}
         </div>
       </article>`;
+  }
+
+  _reportedHtml(e) {
+    const reports = e.reports || [];
+    if (!reports.length) return "";
+    const problems = this._state.problems || {};
+    const labels = [...new Set(reports.map((r) => problems[r.problem] || r.problem))].join("; ");
+    const changes = changeText(e.original || {}, Object.fromEntries(Object.keys(e.original || {}).map((k) => [k, e[k]])));
+    const notes = reports.filter((r) => r.note).map((r) => esc(r.note)).join(" · ");
+    return `<p class="reported"><ha-icon icon="mdi:flag"></ha-icon>
+      <span>Reported: ${esc(labels)}${changes ? ` (${changes})` : ""}${notes ? `<span class="muted"> · ${notes}</span>` : ""}</span>
+      <button class="link" data-action="report-undo" data-id="${esc(e.id)}">Undo</button></p>`;
+  }
+
+  _reportFormHtml(e) {
+    const d = this._reportDraft || {};
+    const problem = d.problem || "location";
+    const problems = this._state.problems || {};
+    const options = Object.entries(problems)
+      .map(([k, label]) => `<option value="${k}" ${k === problem ? "selected" : ""}>${esc(label)}</option>`).join("");
+    const group = (key, html) => `<div class="rf" data-for="${key}" ${key === problem ? "" : "hidden"}>${html}</div>`;
+    return `
+      <form class="report" data-id="${esc(e.id)}" onsubmit="return false">
+        <label>What's wrong? <select name="problem" data-action="report-problem">${options}</select></label>
+        ${group("location", `
+          <input name="town" placeholder="Correct town or city${e.town ? ` (listed as ${esc(e.town)})` : ""}" value="${esc(d.town || "")}">
+          <input name="venue" placeholder="Venue (optional)" value="${esc(d.venue || "")}">`)}
+        ${group("date", `
+          <label>Date <input type="date" name="date" value="${esc(d.date || "")}"></label>
+          <label>Time <input type="time" name="time" value="${esc(d.time || "")}"></label>
+          <label>Last day <input type="date" name="end_date" value="${esc(d.end_date || "")}"></label>`)}
+        ${group("link", `<input name="url" type="url" placeholder="https://… correct page" value="${esc(d.url || "")}">`)}
+        <textarea name="note" rows="2" placeholder="Note (optional)">${esc(d.note || "")}</textarea>
+        <p class="muted small hint" data-hint>${esc(REPORT_HINTS[problem] || "")}</p>
+        <div class="form-actions">
+          <button type="button" class="primary" data-action="report-submit" data-id="${esc(e.id)}" ${this._reportBusy ? "disabled" : ""}>${this._reportBusy ? "Saving…" : "Send report"}</button>
+          <button type="button" class="secondary" data-action="report-cancel">Cancel</button>
+        </div>
+      </form>`;
+  }
+
+  _showReportFields(form) {
+    const problem = form.elements.problem.value;
+    form.querySelectorAll(".rf").forEach((el) => { el.hidden = el.dataset.for !== problem; });
+    form.querySelector("[data-hint]").textContent = REPORT_HINTS[problem] || "";
+  }
+
+  async _report(id, body) {
+    this._error = "";
+    this._notice = "";
+    this._reportBusy = true;
+    if (!body.undo) this._renderBody();
+    try {
+      const state = await this._api("POST", "report", { id, ...body });
+      this._reporting = null;
+      this._reportDraft = null;
+      this._reportBusy = false;
+      this._notice = state.message || "";
+      this._setState(state);
+      setTimeout(() => { this._notice = ""; this._renderHeader(); }, 6000);
+    } catch (err) {
+      this._reportBusy = false;
+      this._error = err.message;
+      this._renderBody();
+    }
+    this._renderHeader();
+  }
+
+  _submitReport(id) {
+    const form = this.shadowRoot.querySelector(`form.report[data-id="${CSS.escape(id)}"]`);
+    if (!form) return;
+    const d = Object.fromEntries(new FormData(form));
+    const fields = { location: ["town", "venue"], date: ["date", "time", "end_date"], link: ["url"] }[d.problem] || [];
+    const correction = Object.fromEntries(fields.map((k) => [k, (d[k] || "").trim()]).filter(([, v]) => v));
+    if (d.problem === "other" && !(d.note || "").trim()) {
+      this._error = "Describe what's wrong in the note.";
+      this._renderHeader();
+      return;
+    }
+    this._reportDraft = d;
+    this._report(id, { problem: d.problem, correction, note: (d.note || "").trim() });
+  }
+
+  _reportsHtml() {
+    const reports = [...(this._state.reports || [])].reverse();
+    if (!reports.length) return "";
+    const problems = this._state.problems || {};
+    const rows = reports.map((r) => {
+      const change = changeText(r.was, r.now);
+      return `<li><b>${esc(r.title)}</b> <span class="muted small">${esc(shortWhen(r.start))}</span><br>
+        ${esc(problems[r.problem] || r.problem)}${change ? `: ${change}` : ""}${r.note ? ` · <span class="muted">${esc(r.note)}</span>` : ""}
+        <span class="muted small"> · ${esc(relative(r.at))}</span></li>`;
+    }).join("");
+    return `
+      <div class="card">
+        <h2>Reported problems</h2>
+        <p class="muted">Your corrections stay attached to the event when searches find it again, and recent ones are passed to the AI so it doesn't repeat the mistake. A source that Event Scout saved by itself is paused once 3 of its events have been reported. To undo one, use Undo on the event.</p>
+        <ul class="reports">${rows}</ul>
+      </div>`;
   }
 
   // -------------------------------------------------------------- settings
@@ -473,6 +604,8 @@ class LocalEventScoutPanel extends HTMLElement {
         </div>
 
         ${this._sourcesHtml(bucketOptions)}
+
+        ${this._reportsHtml()}
 
         ${this._usageHtml()}
 
@@ -635,6 +768,19 @@ class LocalEventScoutPanel extends HTMLElement {
       this._renderBody();
     } else if (action === "feedback") {
       await this._feedback(target.dataset.id, target.dataset.verdict);
+    } else if (action === "report-open") {
+      this._reporting = this._reporting === target.dataset.id ? null : target.dataset.id;
+      this._reportDraft = null;
+      this._renderBody();
+      this.shadowRoot.querySelector("form.report input, form.report select")?.focus();
+    } else if (action === "report-cancel") {
+      this._reporting = null;
+      this._reportDraft = null;
+      this._renderBody();
+    } else if (action === "report-submit") {
+      this._submitReport(target.dataset.id);
+    } else if (action === "report-undo") {
+      await this._report(target.dataset.id, { undo: true });
     } else if (action === "save") {
       await this._save();
     } else if (action === "test-search") {
@@ -770,6 +916,21 @@ const STYLES = `
   .meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; --mdc-icon-size: 20px; }
   .tag { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: var(--secondary-background-color); color: var(--secondary-text-color); }
   .actions { margin-left: auto; display: flex; gap: 2px; }
+  .reported { font-size: 13px; color: var(--warning-color, #c77700); --mdc-icon-size: 16px; margin-top: 6px; }
+  .reported ha-icon { vertical-align: -3px; margin-right: 2px; }
+  .reported span { color: var(--primary-text-color); }
+  button.link { background: none; padding: 0 4px; color: var(--primary-color); text-decoration: underline; font-size: 13px; }
+  form.report { margin-top: 12px; padding: 12px; border-radius: 8px; background: var(--secondary-background-color); display: flex; flex-direction: column; gap: 8px; }
+  form.report label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--secondary-text-color); }
+  form.report .rf { display: flex; gap: 8px; flex-wrap: wrap; }
+  form.report .rf[hidden] { display: none; }
+  form.report .rf > input { flex: 1 1 140px; min-width: 0; }
+  form.report .rf > label { flex: 1 1 120px; }
+  form.report .hint { margin: 0; }
+  .form-actions { display: flex; gap: 8px; }
+  .form-actions button { margin: 0; }
+  ul.reports { margin: 0; padding-left: 18px; }
+  ul.reports li { margin: 8px 0; line-height: 1.4; }
   .empty { padding: 40px 0; text-align: center; color: var(--secondary-text-color); }
   .settings { display: grid; gap: 16px; }
   .card { padding: 18px 20px; }

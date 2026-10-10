@@ -41,6 +41,22 @@ _EVENT_FIELDS = '''  "title": "event name",
   "outdoor": true or false,
   "summary": "one sentence describing the event"'''
 
+_TOWN_RULE = (
+    "Give the town where each event actually takes place, read from the event's own page, not the town you "
+    "searched for: listings for one city often include events elsewhere in the region."
+)
+
+
+def corrections_text(corrections: list[str] | None) -> str:
+    """User-reported corrections; these override anything a web page says."""
+    if not corrections:
+        return ""
+    return (
+        "\nThe user has corrected these details before. Trust them over any web page, and never return "
+        "an event with the details they said were wrong:\n" + "\n".join(f"- {c}" for c in corrections) + "\n"
+    )
+
+
 RANK_SYSTEM = (
     "You are a careful personal events curator. You score how well events match one "
     "person's tastes. You answer with a single JSON object and nothing else."
@@ -57,6 +73,7 @@ def search_prompt(
     dislikes: list[str],
     max_results: int,
     known: list[str] | None = None,
+    corrections: list[str] | None = None,
 ) -> str:
     end = today + timedelta(days=bucket.lookahead_days)
     dislike_text = ", ".join(dislikes) if dislikes else "nothing specified"
@@ -77,7 +94,8 @@ Skip anything matching: {dislike_text}.
 Also skip online-only events, recurring weekly specials (happy hours, wing nights) unless an
 interest asks for them, and anything whose date you cannot confirm from a source.
 Prefer the official event, venue or ticketing page as the URL. Return at most {max_results} events.
-{known_text}
+{_TOWN_RULE}
+{known_text}{corrections_text(corrections)}
 Return exactly this JSON shape:
 {{"events": [{{
 {_EVENT_FIELDS},
@@ -97,6 +115,7 @@ def extract_prompt(
     dislikes: list[str],
     pages: list[tuple[str, str]],
     max_results: int,
+    corrections: list[str] | None = None,
 ) -> str:
     end = today + timedelta(days=bucket.lookahead_days)
     page_text = "\n\n".join(f"=== PAGE {url} ===\n{text}" for url, text in pages)
@@ -109,8 +128,9 @@ From the pages below, list in-person events near {location_text} that start betw
 Skip anything matching: {", ".join(dislikes) if dislikes else "nothing specified"}.
 Use the event's own link from the page (shown in [brackets]) as the URL when there is one,
 otherwise the page URL. If a date has no year, assume the next occurrence after today.
+Give the town where each event actually takes place; pages often list events from other towns too.
 Return at most {max_results} events in total.
-
+{corrections_text(corrections)}
 {page_text}
 
 Return exactly this JSON shape:

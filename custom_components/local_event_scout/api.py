@@ -11,7 +11,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from .const import API_FEEDBACK, API_RUN, API_SOURCES, API_STATE, API_TEST_SEARCH, DOMAIN, FEEDBACK_VERDICTS
+from .const import API_FEEDBACK, API_REPORT, API_RUN, API_SOURCES, API_STATE, API_TEST_SEARCH, DOMAIN, FEEDBACK_VERDICTS
 
 
 def _coordinator(hass: HomeAssistant):
@@ -102,6 +102,24 @@ class EventScoutFeedbackView(_ScoutView):
         return self.json(state)
 
 
+class EventScoutReportView(_ScoutView):
+    """Report wrong details on an event (or undo a report)."""
+
+    url = API_REPORT
+    name = f"api:{DOMAIN}:report"
+
+    async def post(self, request: web.Request) -> web.Response:
+        coordinator = self._get(request)
+        body = await self._body(request)
+        try:
+            state = await coordinator.async_report(str(body.get("id")), body)
+        except KeyError:
+            return self.json_message("Event not found (it may have expired).", HTTPStatus.NOT_FOUND)
+        except ValueError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+        return self.json(state)
+
+
 class EventScoutSourcesView(_ScoutView):
     """Add, update or remove a saved source page."""
 
@@ -137,3 +155,4 @@ def async_register_views(hass: HomeAssistant) -> None:
     hass.http.register_view(EventScoutStateView)
     hass.http.register_view(EventScoutRunView)
     hass.http.register_view(EventScoutFeedbackView)
+    hass.http.register_view(EventScoutReportView)
