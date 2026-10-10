@@ -1,30 +1,50 @@
 name: Release
 
-# Push a tag like v0.5.0 to build the Windows app and publish a GitHub release.
-# HACS also offers tagged releases to Home Assistant users.
+# A release is published automatically when the version in scout/engine.py (and
+# manifest.json) changes on main and no release exists for it yet. Pushing a tag
+# like v0.5.0 also works. The release carries the Windows .exe; HACS offers the
+# same release to Home Assistant users.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' custom_components/local_event_scout/scout/engine.py)
+          manifest=$(python3 -c "import json;print(json.load(open('custom_components/local_event_scout/manifest.json'))['version'])")
+          if [ "$version" != "$manifest" ]; then echo "engine $version and manifest $manifest differ"; exit 1; fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then echo "tag ${GITHUB_REF_NAME} doesn't match v$version"; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"; echo "v$version is already released"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
+    needs: check
+    if: needs.check.outputs.release == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Check the tag matches the version
-        shell: pwsh
-        run: |
-          $version = (Select-String -Path custom_components/local_event_scout/scout/engine.py -Pattern '^VERSION = "(.+)"').Matches[0].Groups[1].Value
-          $manifest = (Get-Content custom_components/local_event_scout/manifest.json | ConvertFrom-Json).version
-          if ("v$version" -ne "${{ github.ref_name }}" -or $manifest -ne $version) {
-            Write-Error "Tag ${{ github.ref_name }}, engine $version, manifest $manifest must all match"; exit 1
-          }
       - run: pip install -r windows/requirements.txt pyinstaller aiohttp pytest pytest-asyncio
       - run: pytest -q
       - run: python windows/build.py
@@ -36,5 +56,8 @@ jobs:
           if ($p.ExitCode -ne 0) { exit 1 }
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.check.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Local Event Scout ${{ needs.check.outputs.version }}
           files: windows/dist/LocalEventScout.exe
           generate_release_notes: true

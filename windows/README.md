@@ -40,4 +40,4 @@ python windows/build.py        # → windows/dist/LocalEventScout.exe
 python windows/run.py          # or run from the checkout without building
 ```
 
-The app imports the shared engine from `custom_components/local_event_scout/scout/`, so both builds always have the same features. GitHub Actions builds and smoke-tests the `.exe` on every push. Pushing a tag such as `v0.5.0` publishes a release with the `.exe` attached.
+The app imports the shared engine from `custom_components/local_event_scout/scout/`, so both builds always have the same features. GitHub Actions builds and smoke-tests the `.exe` on every push. Changing the version number (in `scout/engine.py` and `manifest.json`) on main publishes a release with the `.exe` attached; pushing a tag such as `v0.6.0` works too.
