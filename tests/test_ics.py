@@ -21,7 +21,7 @@ def test_calendar_format():
     assert text.count("BEGIN:VEVENT") == 2
     assert "DTSTART;VALUE=DATE:20261020\r\nDTEND;VALUE=DATE:20261023" in text  # end is exclusive
     assert "DTSTART:20261003T010000Z\r\nDTEND:20261003T030000Z" in text  # 19:00 MDT, 2 hours by default
-    assert "SUMMARY:Folk Fest\\, Day 1\; outdoors" in text
+    assert r"SUMMARY:Folk Fest\, Day 1\; outdoors" in text
     assert "Three days of folk.\\nBring a chair." in text
     assert all(len(line.encode()) <= 75 for line in text.split("\r\n"))
 

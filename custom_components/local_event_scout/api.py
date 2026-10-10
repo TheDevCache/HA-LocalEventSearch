@@ -11,7 +11,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from .const import API_CALENDAR, API_DEBUG, API_DISCOVER, API_FEEDBACK, API_REPORT, API_RUN, API_SOURCES, API_STATE, API_TEST_SEARCH, DOMAIN, FEEDBACK_VERDICTS
+from .const import API_CALENDAR, API_DEBUG, API_DISCOVER, API_SETUP, API_FEEDBACK, API_REPORT, API_RUN, API_SOURCES, API_STATE, API_TEST_SEARCH, DOMAIN, FEEDBACK_VERDICTS
 
 
 def _coordinator(hass: HomeAssistant):
@@ -218,7 +218,22 @@ class EventScoutDiscoverView(_ScoutView):
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
 
 
+class EventScoutLocateView(_ScoutView):
+    """Suggest the user's town from Home Assistant's home location."""
+
+    url = API_SETUP + "/locate"
+    name = f"api:{DOMAIN}:setup_locate"
+
+    async def get(self, request: web.Request) -> web.Response:
+        self._require_admin(request)
+        try:
+            return self.json(await self._get(request).async_suggest_location())
+        except ValueError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+
+
 def async_register_views(hass: HomeAssistant) -> None:
+    hass.http.register_view(EventScoutLocateView)
     hass.http.register_view(EventScoutDiscoverView)
     hass.http.register_view(EventScoutDebugView)
     hass.http.register_view(EventScoutCalendarTokenView)

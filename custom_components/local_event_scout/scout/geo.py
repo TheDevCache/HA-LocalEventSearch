@@ -69,3 +69,30 @@ class Geocoder:
             return None
         self.cache[key] = [point[0], point[1]]
         return point
+
+    async def reverse(self, lat: float, lon: float) -> dict[str, str] | None:
+        """City, region and country for a point (used to suggest the user's location)."""
+        async with self._lock:
+            wait = 1.1 - (time.monotonic() - self._last_request)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_request = time.monotonic()
+            try:
+                async with self._session.get(
+                    NOMINATIM_URL.rsplit("/", 1)[0] + "/reverse",
+                    params={"lat": str(lat), "lon": str(lon), "format": "jsonv2", "zoom": "10"},
+                    headers={"User-Agent": USER_AGENT, "Accept-Language": "en"},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response:
+                    if response.status != 200:
+                        return None
+                    data = await response.json(content_type=None)
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                return None
+        address = (data or {}).get("address") if isinstance(data, dict) else None
+        if not isinstance(address, dict):
+            return None
+        city = next((address[k] for k in ("city", "town", "village", "municipality", "hamlet", "county") if address.get(k)), "")
+        if not city:
+            return None
+        return {"city": city, "region": address.get("state") or address.get("province") or "", "country": address.get("country") or ""}

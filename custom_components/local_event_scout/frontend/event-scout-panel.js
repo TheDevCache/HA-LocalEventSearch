@@ -124,6 +124,28 @@ async function copyText(text, input) {
   }
 }
 
+// Interest ideas for the setup guide: [category, [[name, distance group], ...]].
+const SUGGESTIONS = [
+  ["Music & nightlife", [["Live music", "local"], ["Indie concerts", "local"], ["Jazz and blues", "local"], ["Classical and symphony", "local"],
+    ["Country music", "local"], ["Big-name concerts", "daytrip"], ["DJ nights and dance parties", "local"], ["Open mic nights", "nearby"], ["Karaoke", "nearby"]]],
+  ["Arts & culture", [["Theatre", "local"], ["Comedy shows", "local"], ["Art exhibitions and gallery openings", "local"], ["Film screenings", "local"],
+    ["Museum events", "local"], ["Author talks and book readings", "local"], ["Dance performances", "local"]]],
+  ["Food & drink", [["Food festivals", "daytrip"], ["Farmers markets", "local"], ["Craft beer events", "local"], ["Wine tastings", "local"],
+    ["Cooking classes", "local"], ["Food truck events", "local"]]],
+  ["Festivals & fairs", [["Festivals", "daytrip"], ["Cultural festivals", "daytrip"], ["Craft fairs and makers markets", "local"],
+    ["Rodeos and agricultural fairs", "daytrip"], ["Holiday markets", "local"], ["Fireworks", "local"]]],
+  ["Outdoors & active", [["Hiking groups", "daytrip"], ["Running races", "local"], ["Cycling events", "local"], ["Stargazing", "daytrip"],
+    ["Hot air balloon festivals", "travel"], ["Paragliding", "travel"], ["Birdwatching", "daytrip"], ["Fishing derbies", "daytrip"]]],
+  ["Games & fandom", [["Trivia nights", "nearby"], ["Board game nights", "local"], ["Tabletop RPG nights", "local"], ["Video game tournaments", "local"],
+    ["Comic and cosplay conventions", "daytrip"], ["Anime conventions", "travel"], ["Game development meetups", "local"]]],
+  ["Tech & learning", [["Tech meetups", "local"], ["Hackathons", "daytrip"], ["Workshops and classes", "local"], ["Science talks", "local"], ["Maker events", "local"]]],
+  ["Social", [["Singles events", "local"], ["Speed dating", "local"], ["Meetup groups", "local"], ["Volunteering", "local"], ["LGBTQ+ events", "local"], ["Dance classes", "local"]]],
+  ["Sports", [["Hockey games", "local"], ["Football games", "local"], ["Basketball games", "local"], ["Baseball games", "local"], ["Soccer games", "local"], ["Motorsport", "daytrip"]]],
+  ["Family & wellness", [["Family events", "local"], ["Kids' activities", "nearby"], ["Yoga classes", "nearby"], ["Meditation and wellness", "local"]]],
+];
+
+const WIZARD_STEPS = ["Location", "Interests", "AI check", "Event calendars", "Done"];
+
 const money = (value) => (typeof value === "number" ? `$${value.toFixed(2)}` : "–");
 
 class LocalEventScoutPanel extends HTMLElement {
@@ -330,6 +352,14 @@ class LocalEventScoutPanel extends HTMLElement {
     if (form) this._reportDraft = Object.fromEntries(new FormData(form));
     this.shadowRoot.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === this._tab));
     const body = this.shadowRoot.getElementById("body");
+    const config = this._state.config;
+    if (!this._wizard && !this._wizardDismissed && (!config.locations.length || !config.interests.length)) {
+      this._wizard = { step: config.locations.length ? 2 : 1 };
+    }
+    if (this._wizard && this._tab === "events") {
+      body.innerHTML = this._wizardHtml();
+      return;
+    }
     body.innerHTML = this._tab === "settings" ? this._settingsHtml() : this._eventsHtml();
   }
 
@@ -569,6 +599,212 @@ class LocalEventScoutPanel extends HTMLElement {
       </div>`;
   }
 
+  // ----------------------------------------------------------- setup guide
+
+  _wizardHtml() {
+    const step = this._wizard.step;
+    const steps = WIZARD_STEPS.map((label, i) =>
+      `<li class="${i + 1 === step ? "current" : i + 1 < step ? "done" : ""}"><span>${i + 1}</span>${label}</li>`).join("");
+    const pages = [null, this._wizLocation, this._wizInterests, this._wizCheck, this._wizCalendars, this._wizDone];
+    return `
+      <div class="wizard card">
+        <div class="wiz-head">
+          <h2>Set up Event Scout</h2>
+          <button class="link" data-action="w-skip">Skip the guide</button>
+        </div>
+        <ol class="wiz-steps">${steps}</ol>
+        ${pages[step].call(this)}
+      </div>`;
+  }
+
+  _wizNav(next = "Next", { back = true, nextAction = "w-next", disabled = false } = {}) {
+    return `<div class="wiz-nav">
+      ${back ? '<button class="secondary" data-action="w-back">Back</button>' : "<span></span>"}
+      <button class="primary" data-action="${nextAction}" ${disabled ? "disabled" : ""}>${next}</button></div>`;
+  }
+
+  _wizLocation() {
+    const loc = this._draft.locations[0] || {};
+    return `
+      <h3>Where are you?</h3>
+      <p class="muted">Events are found around this town, and distances are measured from it. You can add more places later in Settings.</p>
+      <div class="row">
+        <input id="w-city" placeholder="Town or city" value="${esc(loc.city || "")}">
+        <input id="w-region" placeholder="Province / state" value="${esc(loc.region || "")}">
+        <input id="w-country" placeholder="Country" value="${esc(loc.country || "")}">
+      </div>
+      <button class="secondary" data-action="w-locate" ${this._locating ? "disabled" : ""}>${this._locating ? "Looking up…" : this._state.host === "homeassistant" ? "Use Home Assistant's home location" : "Use my home location"}</button>
+      ${this._wizNav("Next", { back: false })}`;
+  }
+
+  _wizInterests() {
+    const chosen = new Set(this._draft.interests.map((i) => i.name.toLowerCase()));
+    const groups = SUGGESTIONS.map(([cat, items]) => `
+      <div class="chip-group"><h4>${esc(cat)}</h4><div class="chips">
+        ${items.map(([name, bucket]) => `<button class="chip-btn ${chosen.has(name.toLowerCase()) ? "on" : ""}" data-action="w-chip" data-name="${esc(name)}" data-bucket="${bucket}">${esc(name)}</button>`).join("")}
+      </div></div>`).join("");
+    const buckets = this._draft.buckets;
+    const bucketOptions = (selected) =>
+      buckets.map((b) => `<option value="${b.id}" ${b.id === selected ? "selected" : ""}>${esc(b.label)} (${b.km} km)</option>`).join("");
+    const priorityOptions = (selected) => [["high", "High priority"], ["normal", "Normal"], ["low", "Low priority"]]
+      .map(([v, label]) => `<option value="${v}" ${v === selected ? "selected" : ""}>${label}</option>`).join("");
+    const rows = this._draft.interests.map((it, i) => `
+      <div class="row w-int" data-index="${i}">
+        <span class="w-int-name">${esc(it.name)}</span>
+        <select data-f="bucket">${bucketOptions(it.bucket)}</select>
+        <select data-f="priority" class="priority">${priorityOptions(it.priority)}</select>
+        <button class="icon" title="Remove" data-action="w-remove" data-index="${i}"><ha-icon icon="mdi:close"></ha-icon></button>
+      </div>`).join("");
+    return `
+      <h3>What are you into?</h3>
+      <p class="muted">Pick a few ideas or type your own. Specific works best: "bluegrass jam nights" finds more than "music".
+        Each interest has a distance group: how far you'd travel for it.</p>
+      ${groups}
+      <div class="row"><input id="w-custom" placeholder="Something else, e.g. salsa dancing">
+        <button class="secondary" data-action="w-add">Add</button></div>
+      ${rows ? `<h4>Your interests (${this._draft.interests.length})</h4>${rows}` : ""}
+      ${this._wizNav("Next", { disabled: !this._draft.interests.length })}`;
+  }
+
+  _wizCheck() {
+    const gemini = this._state.provider === "gemini";
+    const t = this._testResult;
+    const failed = t && !t.working;
+    const where = this._state.host === "homeassistant"
+      ? "Settings → Devices &amp; services → Local Event Scout → ⋮ → Reconfigure"
+      : "Event Scout's provider settings";
+    const help = gemini
+      ? `Google Search only works with a key from an AI Studio project that has billing turned on (it includes 5,000 free searches a month).
+         Create or check keys at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer noopener">aistudio.google.com/apikey</a>.`
+      : `Check the key at <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer noopener">openrouter.ai/settings/keys</a>:
+         it needs credit, and a monthly limit above $0.`;
+    return `
+      <h3>Check the AI connection</h3>
+      <p class="muted">You're using ${gemini ? "Google Gemini" : "OpenRouter"}. This runs one small web search near ${esc((this._draft.locations[0] || {}).city || "you")}
+        to make sure your key can search the web (${gemini ? "free" : "a fraction of a cent"}).</p>
+      <div class="test-search">
+        <button class="secondary" data-action="test-search" ${this._testing ? "disabled" : ""}>${this._testing ? "Testing…" : "Test web search"}</button>
+        ${this._testHtml()}
+      </div>
+      ${failed ? `<div class="help"><p>${help}</p><p>To change keys: ${where}.</p></div>` : ""}
+      ${this._wizNav(t ? "Next" : "Skip this check")}`;
+  }
+
+  _wizCalendars() {
+    const buckets = this._draft.buckets;
+    const bucketOptions = (selected) =>
+      buckets.map((b) => `<option value="${b.id}" ${b.id === selected ? "selected" : ""}>${esc(b.label)} (${b.km} km)</option>`).join("");
+    const saved = (this._state.sources || []).length;
+    return `
+      <h3>Event calendars <span class="muted small">(optional)</span></h3>
+      <p class="muted">Saved event pages are read directly on every search, with no web-search fee. They often find more than searching does.</p>
+      ${this._discoverHtml(bucketOptions)}
+      ${saved ? `<p class="muted small">${saved} source${saved === 1 ? "" : "s"} saved.</p>` : ""}
+      ${this._wizNav(this._discovered && this._discovered.some((d) => d.checked) ? "Save selected and continue" : "Next")}`;
+  }
+
+  _wizDone() {
+    const c = this._state.config;
+    const loc = c.locations[0] || {};
+    return `
+      <h3>All set</h3>
+      <ul class="summary-list">
+        <li>Searching around <b>${esc([loc.city, loc.region].filter(Boolean).join(", "))}</b></li>
+        <li><b>${c.interests.length}</b> interest${c.interests.length === 1 ? "" : "s"}</li>
+        <li><b>${(this._state.sources || []).length}</b> saved event page${(this._state.sources || []).length === 1 ? "" : "s"}</li>
+        <li>Searches run every night at <b>${esc(c.schedule)}</b>; distance groups and everything else can be changed in Settings.</li>
+      </ul>
+      <p class="muted">The first search takes a minute or two.</p>
+      <div class="wiz-nav">
+        <button class="secondary" data-action="w-back">Back</button>
+        <span><button class="secondary" data-action="w-close">Finish without searching</button>
+        <button class="primary" data-action="w-finish">Search now</button></span>
+      </div>`;
+  }
+
+  _wizCollect() {
+    const root = this.shadowRoot;
+    if (root.getElementById("w-city")) {
+      const loc = this._draft.locations[0] || {};
+      this._draft.locations[0] = {
+        ...loc,
+        city: root.getElementById("w-city").value.trim(),
+        region: root.getElementById("w-region").value.trim(),
+        country: root.getElementById("w-country").value.trim(),
+      };
+    }
+    root.querySelectorAll(".w-int").forEach((row) => {
+      const it = this._draft.interests[Number(row.dataset.index)];
+      if (!it) return;
+      it.bucket = row.querySelector('[data-f="bucket"]').value;
+      it.priority = row.querySelector('[data-f="priority"]').value;
+    });
+  }
+
+  async _wizSave() {
+    try {
+      this._setState(await this._api("POST", "config", this._draft), true);
+      return true;
+    } catch (err) {
+      this._error = err.message;
+      this._renderHeader();
+      return false;
+    }
+  }
+
+  async _wizAction(action, target) {
+    this._error = "";
+    this._wizCollect();
+    const w = this._wizard;
+    if (action === "w-skip" || action === "w-close") {
+      this._wizard = null;
+      this._wizardDismissed = true;
+      if (action === "w-close") await this._wizSave();
+    } else if (action === "w-back") {
+      w.step = Math.max(1, w.step - 1);
+    } else if (action === "w-next") {
+      if (w.step === 1) {
+        if (!(this._draft.locations[0] || {}).city) {
+          this._error = "Enter your town or city.";
+          this._renderHeader();
+          return;
+        }
+        if (!(await this._wizSave())) return;
+      } else if (w.step === 2) {
+        if (!(await this._wizSave())) return;
+      } else if (w.step === 4 && this._discovered && this._discovered.some((d) => d.checked)) {
+        if (!(await this._saveDiscovered())) return;
+      }
+      w.step = Math.min(WIZARD_STEPS.length, w.step + 1);
+    } else if (action === "w-locate") {
+      this._locating = true;
+      this._renderBody();
+      try {
+        const place = await this._api("GET", "setup/locate");
+        this._draft.locations[0] = { ...(this._draft.locations[0] || {}), ...place };
+      } catch (err) {
+        this._error = err.message;
+      }
+      this._locating = false;
+    } else if (action === "w-chip" || action === "w-add") {
+      const name = action === "w-add" ? this.shadowRoot.getElementById("w-custom").value.trim() : target.dataset.name;
+      if (!name) return;
+      const index = this._draft.interests.findIndex((i) => i.name.toLowerCase() === name.toLowerCase());
+      if (index >= 0 && action === "w-chip") this._draft.interests.splice(index, 1);
+      else if (index < 0) this._draft.interests.push({ name, bucket: target.dataset.bucket || "local", priority: "normal" });
+    } else if (action === "w-remove") {
+      this._draft.interests.splice(Number(target.dataset.index), 1);
+    } else if (action === "w-finish") {
+      this._wizard = null;
+      this._wizardDismissed = true;
+      this._filter = "picks";
+      await this._scan();
+      return;
+    }
+    this._renderHeader();
+    this._renderBody();
+  }
+
   // -------------------------------------------------------------- settings
 
   _settingsHtml() {
@@ -684,6 +920,10 @@ class LocalEventScoutPanel extends HTMLElement {
         ${this._usageHtml()}
 
         ${this._troubleHtml()}
+
+        <div class="card"><h2>Setup guide</h2>
+          <p class="muted">Walk through location, interest ideas, the AI check and event calendars again.</p>
+          <button class="secondary" data-action="open-guide">Open the setup guide</button></div>
 
         <div class="save-bar">
           <span class="muted" id="dirty">${this._dirty ? "Unsaved changes" : ""}</span>
@@ -952,7 +1192,9 @@ class LocalEventScoutPanel extends HTMLElement {
     const target = e.target.closest("[data-action]");
     if (!target || target.tagName === "SELECT") return;
     const action = target.dataset.action;
-    if (action === "filter") {
+    if (action.startsWith("w-")) {
+      await this._wizAction(action, target);
+    } else if (action === "filter") {
       this._filter = target.dataset.filter;
       this._renderBody();
     } else if (action === "feedback") {
@@ -989,6 +1231,12 @@ class LocalEventScoutPanel extends HTMLElement {
       await this._report(target.dataset.id, { undo: true });
     } else if (action === "save") {
       await this._save();
+    } else if (action === "open-guide") {
+      if (this._dirty) this._draft = this._collect();
+      this._wizard = { step: 1 };
+      this._tab = "events";
+      this._renderHeader();
+      this._renderBody();
     } else if (action === "discover") {
       await this._discover();
     } else if (action === "discover-save") {
@@ -1146,6 +1394,25 @@ const STYLES = `
   .feed label { flex: 1 1 320px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--secondary-text-color); }
   .feed input { width: 100%; font-family: monospace; font-size: 12px; }
   .feed button { align-self: flex-end; }
+  .wizard { padding: 20px 24px; }
+  .wiz-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .wiz-steps { display: flex; flex-wrap: wrap; gap: 6px 18px; list-style: none; padding: 0; margin: 8px 0 18px; font-size: 13px; color: var(--secondary-text-color); }
+  .wiz-steps li { display: flex; align-items: center; gap: 6px; }
+  .wiz-steps span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--secondary-background-color); font-size: 12px; }
+  .wiz-steps li.current { color: var(--primary-text-color); font-weight: 500; }
+  .wiz-steps li.current span, .wiz-steps li.done span { background: var(--primary-color); color: var(--text-primary-color); }
+  .wizard h3 { margin: 0 0 6px; font-size: 20px; font-weight: 500; }
+  .wizard h4 { margin: 14px 0 6px; font-size: 14px; font-weight: 500; color: var(--secondary-text-color); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip-btn { background: var(--secondary-background-color); color: var(--primary-text-color); border-radius: 16px; padding: 6px 12px; font-size: 14px; }
+  .chip-btn.on { background: var(--primary-color); color: var(--text-primary-color); }
+  .w-int-name { flex: 2 1 160px; }
+  .wiz-nav { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--divider-color); }
+  .wiz-nav button { margin: 0; }
+  .wiz-nav span { display: flex; gap: 8px; flex-wrap: wrap; }
+  .help { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: var(--secondary-background-color); }
+  .help a, .muted a { color: var(--primary-color); }
+  .summary-list { padding-left: 20px; line-height: 1.8; }
   .discover { margin: 14px 0 6px; padding-top: 12px; border-top: 1px solid var(--divider-color); }
   .discover > button { margin: 0 10px 0 0; }
   .disc-list { margin: 10px 0; }

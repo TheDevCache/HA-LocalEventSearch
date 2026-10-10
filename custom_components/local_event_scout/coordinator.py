@@ -221,6 +221,9 @@ class EventScoutCoordinator:
         await self.engine.new_calendar_token()
         return self.public_state()
 
+    async def async_suggest_location(self) -> dict[str, str]:
+        return await self.engine.suggest_location()
+
     async def async_discover(self) -> dict[str, Any]:
         return await self.engine.discover()
 

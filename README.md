@@ -9,10 +9,12 @@ It works with either of two AI providers, chosen when you add the integration:
 
 ## What it does
 
+- **Setup guide.** The first time you open Event Scout it walks you through your location (it can read it from Home Assistant), interest ideas to tap, a check that your AI key can really search the web, and finding your town's event calendars. You can open it again from Settings.
 - **Distance groups.** Each interest belongs to a group: Nearby 15 km, Local 50 km, Day trip 150 km, or Worth travelling 400 km. Each group has its own look-ahead window and search frequency, so far-away festivals show up months ahead while trivia nights are checked daily.
 - **Real distances.** Venues are located with OpenStreetMap, and events outside their group's radius are dropped.
 - **Scoring.** Every event gets a 0–10 match score with a one-line reason. Picks are events at or above your minimum score.
 - **Interest priority.** Each interest is High, Normal or Low priority. High interests come first in searches and get +1 on their score; Low interests get −1.
+- **Find my city's event calendars.** One web search looks for the city, tourism, venue and news event listings around you, and each page is loaded to check that Event Scout can read it. Tick the ones to save.
 - **Saved sources.** When a search finds a good event on a venue's or organiser's events page, that page is saved. Later runs read saved pages directly, with no web-search fee. Once a distance group has two working sources, its full web search runs only every few days (weekly by default). Sources that keep coming up empty are paused. You can add, pause and remove sources on the settings page; 👍 on an event also saves its page.
 - **Feedback.** 👍 and 👎 on an event teach future searches. Hiding an event only removes it from view.
 - **Report wrong info.** The flag on an event lets you say what's wrong: the town or venue, the date, a cancelled event, the link, or anything else, with the right details if you know them. A corrected town is looked up on the map again, and the event is hidden if it's now outside its distance group. Corrections stick when later searches find the same event again, a cancelled event is never re-added, and recent corrections are passed to the AI so it doesn't repeat the mistake. A source Event Scout saved by itself is paused once 3 of its events have been reported. **Undo** on the event puts the original details back.
@@ -20,7 +22,9 @@ It works with either of two AI providers, chosen when you add the integration:
 - **Clean results.** Today's date goes into every search. Past events, duplicates, and events with broken links are removed.
 - **Retries.** When the AI service is overloaded or rate-limited, each call is retried twice (after about 15 and 45 seconds, or whenever the service asks). Garbled answers are asked for once more. If a part of the run still fails, it is tried again 30 minutes later (up to 3 times a day); groups whose search failed stay due, and events left unscored are scored on the next run.
 - **Gemini search check.** Searches go through Google's Interactions API first and fall back to the older generateContent API; whichever actually searches with your key is remembered. If Gemini answers without running a Google search, it is asked once more; if it still doesn't, the answer is discarded instead of risking made-up events. **Test web search** in Search options runs one small search and shows exactly what happened.
+- **Calendar.** Subscribe to your picks from Outlook, Apple Calendar or Google Calendar with a private feed link (Settings → Calendar feed), or add a single event with the calendar button on its card.
 - **Results add up.** New searches add to the list and never replace it. An event is removed only a day after it ends; hidden events stay in the Hidden tab until then.
+- **Clear errors.** Problems such as a rejected key, no credit, a wrong model name or a missing billing project say what to do about them. **Copy debug info** (Settings → Troubleshooting) collects what's needed for a bug report, without your keys.
 - **Spending.** The settings page shows what each call in the last run cost (web searches, input, output and thinking tokens). With OpenRouter, your key's monthly usage and limit appear on the page and as a sensor, and scans are skipped when the limit is nearly used up. With Gemini, the page shows the estimated cost and how many of the 5,000 free monthly Google searches you've used.
 
 ### Entities
@@ -61,13 +65,13 @@ To switch provider or change keys later: **Settings → Devices & services → L
 ## Cost
 
 - **OpenRouter:** each group's search may make up to 2 web searches (about half a cent each, plus reading time). Change this with **Web searches per group** in Search options; **Interests per search** (default 3) sets how many interests share each search, with the rest taking turns on later runs. Expect roughly 1–2¢ per call with DeepSeek V4.1 Flash, plus a fraction of a cent for scoring and for reading saved sources. Saved sources cut the number of web searches over time.
-- **Gemini:** web searches are free up to 5,000 a month on the billing project; you pay only for the tokens of those calls (well under 1¢ each with `gemini-3.1-flash-lite`). Everything else is free on the free-tier key.
+- **Gemini:** web searches are free up to 5,000 a month on the billing project; you pay only for the tokens of those calls (well under 1¢ each with `gemini-3.1-flash-lite`). Everything else is free on the free-tier key. **Searches per group** (default 2) sets how many separate Google searches each distance group gets per run, each covering different interests.
 
 The settings page shows the exact cost of every call in the last run.
 
 ## Developing
 
-The search logic in `custom_components/local_event_scout/scout/` has no Home Assistant imports, so you can run and tune it on any PC:
+Everything Event Scout does lives in `custom_components/local_event_scout/scout/`, which has no Home Assistant imports: `engine.py` holds the settings, results, scans, feedback, reports and sources, and each host (the Home Assistant integration, the upcoming Windows app) only adds storage, scheduling and its own UI hosting. You can run and tune the search on any PC:
 
 ```bash
 pip install aiohttp pytest pytest-asyncio

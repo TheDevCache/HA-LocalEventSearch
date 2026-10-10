@@ -650,6 +650,17 @@ class ScoutEngine:
             "working": "openrouter" if searched else None,
         }
 
+    # ------------------------------------------------------------------ setup
+
+    async def suggest_location(self) -> dict[str, str]:
+        """The host's home as city / region / country, for the setup guide."""
+        if not self.home:
+            raise ValueError("No home location is set on this computer.")
+        place = await Geocoder(self.session, self.results["geocode_cache"]).reverse(*self.home)
+        if not place:
+            raise ValueError("Couldn't look up your home location. Type your town instead.")
+        return place
+
     # --------------------------------------------------------------- discovery
 
     async def discover(self) -> dict[str, Any]:
