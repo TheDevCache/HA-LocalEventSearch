@@ -85,24 +85,28 @@ def _gemini_answer(searched: bool, text='{"events": []}'):
 
 async def test_gemini_insists_on_searching_then_reports_it(monkeypatch):
     async with aiohttp.ClientSession() as session:
-        provider = GeminiProvider(session, search_key="P", process_key=None,
+        provider = GeminiProvider(session, search_key="P", process_key=None, search_api="generate",
                                   search_model="gemini-3.1-flash-lite", process_model="gemini-3.8-flash")
         sent = []
 
-        async def answers_from_memory(model, key, body):
-            sent.append(json.loads(json.dumps(body)))
+        async def answers_from_memory(model, key, body, path=None):
+            sent.append((path, json.loads(json.dumps(body))))
+            if path == "/interactions":
+                return {"status": "completed", "steps": [{"type": "model_output", "content": [{"type": "text", "text": "{}"}]}]}
             return _gemini_answer(searched=False)
 
         monkeypatch.setattr(provider, "_post", answers_from_memory)
-        with pytest.raises(ProviderError, match="billing"):
+        with pytest.raises(ProviderError, match="Test web search"):
             await provider.complete("sys", "find events", web_search=True, reasoning="low")
-        assert len(sent) == 2 and "run Google searches now" in sent[1]["contents"][0]["parts"][0]["text"]
+        assert [p for p, _ in sent] == [None, None, "/interactions", "/interactions"]
+        assert "run Google searches now" in sent[1][1]["contents"][0]["parts"][0]["text"]
 
         replies = iter([_gemini_answer(searched=False), _gemini_answer(searched=True)])
 
-        async def searches_second_time(model, key, body):
+        async def searches_second_time(model, key, body, path=None):
             return next(replies)
 
+        provider.search_api = "generate"
         monkeypatch.setattr(provider, "_post", searches_second_time)
         done = await provider.complete("sys", "find events", web_search=True, reasoning="low")
         assert done.usage["web_searches"] == 1
@@ -115,7 +119,7 @@ async def test_gemini_retries_when_overloaded(monkeypatch):
         provider.retry_delays = (0, 0)
         replies = iter([ProviderError("high demand", transient=True), _gemini_answer(searched=False, text='{"rankings": []}')])
 
-        async def post(model, key, body):
+        async def post(model, key, body, path=None):
             reply = next(replies)
             if isinstance(reply, Exception):
                 raise reply

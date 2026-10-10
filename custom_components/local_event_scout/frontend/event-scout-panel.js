@@ -464,6 +464,11 @@ class LocalEventScoutPanel extends HTMLElement {
             <input id="discovery_days" type="number" min="1" max="60" value="${c.discovery_days}"> days</label>
           <label class="check"><input id="check_links" type="checkbox" ${c.check_links ? "checked" : ""}> Drop events whose links are broken</label>
           <label class="check"><input id="auto_sources" type="checkbox" ${c.auto_sources ? "checked" : ""}> Save good event pages as sources automatically</label>
+          <div class="test-search">
+            <button class="secondary" data-action="test-search" ${this._testing ? "disabled" : ""}>${this._testing ? "Testing…" : "Test web search"}</button>
+            <span class="muted small">Runs one small search to check that your key can really search the web (costs a fraction of a cent).</span>
+            ${this._testHtml()}
+          </div>
           <p class="muted small">AI provider: ${s.provider === "gemini" ? "Google Gemini" : "OpenRouter"}. To switch provider or change keys: Settings → Devices &amp; services → Local Event Scout → ⋮ → Reconfigure.</p>
         </div>
 
@@ -529,6 +534,40 @@ class LocalEventScoutPanel extends HTMLElement {
           <tbody>${rows}</tbody>
         </table></div>
       </div>`;
+  }
+
+  _testHtml() {
+    const t = this._testResult;
+    if (!t) return "";
+    const names = { interactions: "Interactions API", generate: "generateContent API", openrouter: "OpenRouter web search" };
+    const rows = Object.entries(t.results || {}).map(([api, r]) => {
+      const verdict = r.error
+        ? `<span class="warn-text">failed: ${esc(r.error)}</span>`
+        : r.searched
+          ? `<span class="ok-text">searched${r.searches ? ` (${r.searches} ${r.searches === 1 ? "query" : "queries"})` : ""}</span>`
+          : `<span class="warn-text">answered without searching</span>`;
+      return `<li><b>${esc(names[api] || api)}</b>: ${verdict}${r.answer ? `<div class="muted small">${esc(r.answer)}</div>` : ""}</li>`;
+    }).join("");
+    const summary = t.working
+      ? `Web search works${t.provider === "gemini" ? ` using the ${esc(names[t.working])}; Event Scout will use it from now on` : ""}.`
+      : "Web search is not working with this key and model.";
+    return `<div class="test-result"><p>${summary} <span class="muted small">Model: ${esc(t.model)}</span></p><ul>${rows}</ul></div>`;
+  }
+
+  async _testSearch() {
+    this._error = "";
+    this._testing = true;
+    this._testResult = null;
+    if (this._dirty) this._draft = this._collect();
+    this._renderBody();
+    try {
+      this._testResult = await this._api("POST", "test_search", {});
+    } catch (err) {
+      this._error = err.message;
+      this._renderHeader();
+    }
+    this._testing = false;
+    this._renderBody();
   }
 
   async _sourceAction(body) {
@@ -598,6 +637,8 @@ class LocalEventScoutPanel extends HTMLElement {
       await this._feedback(target.dataset.id, target.dataset.verdict);
     } else if (action === "save") {
       await this._save();
+    } else if (action === "test-search") {
+      await this._testSearch();
     } else if (action === "source-add") {
       const url = this.shadowRoot.getElementById("source-url").value.trim();
       const bucket = this.shadowRoot.getElementById("source-bucket").value;
@@ -755,6 +796,13 @@ const STYLES = `
   .add-source input { flex: 3 1 240px; }
   .add-source button { margin: 0; }
   .warn-text { color: var(--warning-color, #c77700); }
+  .ok-text { color: var(--success-color, #43a047); }
+  .test-search { margin-top: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .test-search button { margin: 0; }
+  .test-result { flex-basis: 100%; background: var(--secondary-background-color); border-radius: 8px; padding: 10px 14px; }
+  .test-result p { margin: 0 0 6px; }
+  .test-result ul { margin: 0; padding-left: 18px; }
+  .test-result li { margin: 4px 0; }
   .table-wrap { overflow-x: auto; }
   table.usage { width: 100%; border-collapse: collapse; font-size: 14px; }
   table.usage th, table.usage td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--divider-color); white-space: nowrap; }

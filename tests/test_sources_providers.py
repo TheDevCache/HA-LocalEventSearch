@@ -66,11 +66,11 @@ async def test_gemini_provider_uses_the_right_key_and_estimates_cost(monkeypatch
         "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 500, "thoughtsTokenCount": 500, "toolUsePromptTokenCount": 3000},
     }
     async with aiohttp.ClientSession() as session:
-        provider = GeminiProvider(session, search_key="PAID", process_key="FREE",
+        provider = GeminiProvider(session, search_key="PAID", process_key="FREE", search_api="generate",
                                   search_model="gemini-3.1-flash-lite", process_model="gemini-3.8-flash")
 
-        async def fake_post(model, key, body):
-            calls.append((model, key, body))
+        async def fake_post(model, key, body, path=None):
+            calls.append((model, key, body, path))
             return response
 
         monkeypatch.setattr(provider, "_post", fake_post)
@@ -80,9 +80,68 @@ async def test_gemini_provider_uses_the_right_key_and_estimates_cost(monkeypatch
     assert calls[0][:2] == ("gemini-3.1-flash-lite", "PAID") and calls[0][2]["tools"] == [{"google_search": {}}]
     assert calls[1][:2] == ("gemini-3.8-flash", "FREE") and "tools" not in calls[1][2]
     assert searched.content == '{"events": []}' and searched.sources == ["https://r.example/1"]
-    assert searched.usage["web_searches"] == 2 and searched.usage["input_tokens"] == 4000 and searched.usage["output_tokens"] == 1000
+    assert searched.usage["web_searches"] == 2 and searched.usage["api"] == "generate"
+    assert searched.usage["input_tokens"] == 4000 and searched.usage["output_tokens"] == 1000
     assert abs(searched.cost - (4000 * 0.25 + 1000 * 1.50) / 1e6) < 1e-12
     assert ranked.cost == 0 and ranked.usage["free_tier"] is True
+
+
+INTERACTION = {
+    "id": "abc", "status": "completed",
+    "steps": [
+        {"type": "thought", "content": [{"type": "text", "text": "let me search"}]},
+        {"type": "google_search_call", "arguments": {"queries": ["events riverton october", "riverton festival"]}},
+        {"type": "google_search_result", "result": [{"search_suggestions": "<div>…</div>"}]},
+        {"type": "model_output", "content": [{"type": "text", "text": '{"events": []}',
+            "annotations": [{"type": "url_citation", "url": "https://venue.example/e", "start_index": 0, "end_index": 5}]}]},
+    ],
+    "usage": {"total_input_tokens": 900, "total_output_tokens": 300, "total_thought_tokens": 100,
+              "total_tool_use_tokens": 2500, "grounding_tool_count": 1},
+}
+
+
+def test_parse_interaction_response():
+    from scout.providers import _parse_interaction
+
+    reply = _parse_interaction(INTERACTION, search=True)
+    assert reply.text == '{"events": []}' and reply.searched and reply.searches == 2
+    assert reply.sources == ["https://venue.example/e"]
+    assert reply.input_tokens == 3400 and reply.output_tokens == 400 and reply.thought_tokens == 100
+    no_search = {"status": "completed", "steps": [{"type": "model_output", "content": [{"type": "text", "text": "hi"}]}],
+                 "usage": {"total_input_tokens": 50, "total_output_tokens": 5}}
+    assert not _parse_interaction(no_search, search=True).searched
+
+
+async def test_gemini_auto_mode_prefers_interactions_and_falls_back(monkeypatch):
+    memory_answer = {"status": "completed", "steps": [{"type": "model_output", "content": [{"type": "text", "text": '{"events": []}'}]}],
+                     "usage": {"total_input_tokens": 700, "total_output_tokens": 50}}
+    grounded_generate = {"candidates": [{"content": {"parts": [{"text": '{"events": []}'}]},
+                                         "groundingMetadata": {"webSearchQueries": ["q"]}}], "usageMetadata": {}}
+    async with aiohttp.ClientSession() as session:
+        provider = GeminiProvider(session, search_key="P", process_key="F",
+                                  search_model="gemini-3.1-flash-lite", process_model="gemini-3.8-flash")
+        paths = []
+
+        async def post(model, key, body, path=None):
+            paths.append(path or "generate")
+            return memory_answer if path == "/interactions" else grounded_generate
+
+        monkeypatch.setattr(provider, "_post", post)
+        done = await provider.complete("sys", "find", web_search=True, reasoning="low")
+        assert paths == ["/interactions", "/interactions", "generate"]  # interactions twice (with nudge), then generate
+        assert done.usage["api"] == "generate" and provider.search_api == "generate"
+
+        paths.clear()
+
+        async def interactions_work(model, key, body, path=None):
+            paths.append(path or "generate")
+            assert body["tools"] == [{"type": "google_search"}] and body["system_instruction"] == "sys"
+            return INTERACTION
+
+        provider.search_api = "auto"
+        monkeypatch.setattr(provider, "_post", interactions_work)
+        done = await provider.complete("sys", "find", web_search=True, reasoning="low")
+        assert paths == ["/interactions"] and done.usage["api"] == "interactions" and done.usage["web_searches"] == 2
 
 
 ICS = """BEGIN:VCALENDAR\r

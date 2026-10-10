@@ -93,6 +93,7 @@ def _empty_results() -> dict[str, Any]:
         "interest_searched": {},
         "sources": [],
         "geocode_cache": {},
+        "gemini_search_api": "auto",  # which Gemini request style actually searches with this key
         "spend": None,
     }
 
@@ -513,6 +514,7 @@ class EventScoutCoordinator:
                 process_key=self.entry.data.get(CONF_GEMINI_KEY) or None,
                 search_model=self.config["gemini_search_model"],
                 process_model=self.config["gemini_model"],
+                search_api=self.results.get("gemini_search_api", "auto"),
             )
         return OpenRouterProvider(
             OpenRouterClient(session, self.entry.data[CONF_API_KEY]),
@@ -522,6 +524,47 @@ class EventScoutCoordinator:
         )
 
     # ------------------------------------------------------------------- scan
+
+    async def async_test_search(self) -> dict[str, Any]:
+        """One tiny search with the configured provider, to check that web search really works."""
+        place = self.config["locations"][0] if self.config["locations"] else None
+        where = ", ".join(p for p in (place.get("city"), place.get("region"), place.get("country")) if p) if place else (
+            self.hass.config.location_name or "the user's area"
+        )
+        session = async_get_clientsession(self.hass)
+        llm = self._llm(session)
+        if isinstance(llm, GeminiProvider):
+            report = await llm.test_search(where)
+            working = next((api for api in GeminiProvider.SEARCH_APIS if report.get(api, {}).get("searched")), None)
+            if working:
+                self.results["gemini_search_api"] = working
+                await self._results_store.async_save(self.results)
+            return {"provider": PROVIDER_GEMINI, "model": llm.search_model, "results": report, "working": working}
+        try:
+            done = await llm.complete(
+                "Answer briefly.",
+                f"Name two public events happening in or near {where} in the next two weeks, with a link for each.",
+                web_search=True,
+                reasoning="low",
+            )
+        except OpenRouterError as err:
+            return {"provider": PROVIDER_OPENROUTER, "model": llm.model, "results": {"openrouter": {"searched": False, "error": str(err)}}}
+        searches = done.usage.get("web_searches")
+        return {
+            "provider": PROVIDER_OPENROUTER,
+            "model": llm.model,
+            "results": {
+                "openrouter": {
+                    # OpenRouter does not always report the count; a large input means results were read.
+                    "searched": bool(searches) or (done.usage.get("input_tokens") or 0) > 2000,
+                    "searches": searches,
+                    "cost": done.cost,
+                    "answer": done.content[:300],
+                    "error": None,
+                }
+            },
+            "working": "openrouter",
+        }
 
     def async_request_scan(self, force: bool = True) -> dict[str, Any]:
         """Validate and start a scan in the background; returns immediately."""
@@ -611,9 +654,10 @@ class EventScoutCoordinator:
 
             weather = await self._weather_summary()
             session = async_get_clientsession(self.hass)
+            llm = self._llm(session)
             pipeline = ScoutPipeline(
                 session,
-                self._llm(session),
+                llm,
                 tz=dt_util.get_default_time_zone(),
                 tz_name=self.hass.config.time_zone,
                 geocode_cache=self.results["geocode_cache"],
@@ -645,6 +689,8 @@ class EventScoutCoordinator:
                 unscored=self._unscored(),
                 progress=_progress,
             )
+            if isinstance(llm, GeminiProvider) and llm.search_api in GeminiProvider.SEARCH_APIS:
+                self.results["gemini_search_api"] = llm.search_api
             new_count = self._merge_events(result.events)
             self._remember_coordinates(profile.locations)
             stamp = started.isoformat()

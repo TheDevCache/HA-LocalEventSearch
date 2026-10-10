@@ -11,7 +11,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from .const import API_FEEDBACK, API_RUN, API_SOURCES, API_STATE, DOMAIN, FEEDBACK_VERDICTS
+from .const import API_FEEDBACK, API_RUN, API_SOURCES, API_STATE, API_TEST_SEARCH, DOMAIN, FEEDBACK_VERDICTS
 
 
 def _coordinator(hass: HomeAssistant):
@@ -120,7 +120,19 @@ class EventScoutSourcesView(_ScoutView):
         return self.json(state)
 
 
+class EventScoutTestSearchView(_ScoutView):
+    """Run one tiny web search and report whether the provider really searched."""
+
+    url = API_TEST_SEARCH
+    name = f"api:{DOMAIN}:test_search"
+
+    async def post(self, request: web.Request) -> web.Response:
+        self._require_admin(request)
+        return self.json(await self._get(request).async_test_search())
+
+
 def async_register_views(hass: HomeAssistant) -> None:
+    hass.http.register_view(EventScoutTestSearchView)
     hass.http.register_view(EventScoutSourcesView)
     hass.http.register_view(EventScoutStateView)
     hass.http.register_view(EventScoutRunView)

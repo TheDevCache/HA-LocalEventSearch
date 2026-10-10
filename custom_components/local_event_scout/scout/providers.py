@@ -146,9 +146,11 @@ class GeminiProvider:
         search_model: str,
         process_model: str,
         process_key_is_free: bool = True,
+        search_api: str = "auto",
         timeout: float = 180,
     ) -> None:
         self._session = session
+        self.search_api = search_api
         self._search_key = search_key
         self._process_key = process_key or search_key
         self.search_model = search_model
@@ -157,33 +159,106 @@ class GeminiProvider:
         self._timeout = aiohttp.ClientTimeout(total=timeout)
 
     async def complete(self, system: str, user: str, *, web_search: bool, reasoning: str) -> Completion:
-        model = self.search_model if web_search else self.process_model
-        key = self._search_key if web_search else self._process_key
+        if web_search:
+            return await self._search(system, user, reasoning)
+        reply = await self._generate(self.process_model, self._process_key, system, user, reasoning, search=False)
+        return self._completion(reply, self.process_model, free=self._process_free)
+
+    # Google documents two request styles. Search is the main documented path in the newer
+    # Interactions API; the older generateContent API sometimes answers without searching.
+    # In "auto" mode both are tried (Interactions first) and the one that works is remembered.
+    SEARCH_APIS = ("interactions", "generate")
+
+    def _search_order(self) -> list[str]:
+        if self.search_api in self.SEARCH_APIS:
+            return [self.search_api] + [a for a in self.SEARCH_APIS if a != self.search_api]
+        return list(self.SEARCH_APIS)
+
+    async def _search(self, system: str, user: str, reasoning: str) -> Completion:
+        problems = []
+        for api in self._search_order():
+            call = self._interact if api == "interactions" else self._generate
+            try:
+                reply = await call(self.search_model, self._search_key, system, user, reasoning, search=True)
+                if not reply.searched:
+                    # Gemini decides for itself whether to search and sometimes answers from memory,
+                    # which gives stale or invented events. Ask once more, insisting on a search.
+                    nudged = user + (
+                        "\n\nImportant: run Google searches now and use only events found in the results. "
+                        "Do not answer from memory."
+                    )
+                    reply = await call(self.search_model, self._search_key, system, nudged, reasoning, search=True)
+            except ProviderAuthError:
+                raise
+            except ProviderError as err:
+                if err.transient:
+                    raise  # overload etc.: let the run-level retry handle it
+                problems.append(f"{api}: {err}")
+                continue
+            if reply.searched:
+                self.search_api = api  # remember what works for this key
+                completion = self._completion(reply, self.search_model, free=False)
+                completion.usage["api"] = api
+                return completion
+            problems.append(f"{api}: answered without searching")
+        raise ProviderError(
+            "Gemini answered without running any Google searches, so its results were not used ("
+            + "; ".join(problems)
+            + "). Use “Test web search” in Search options to check the search key."
+        )
+
+    def _completion(self, reply: "_Reply", model: str, *, free: bool) -> Completion:
+        price = GEMINI_PRICES.get(model)
+        cost = 0.0 if free or not price else (reply.input_tokens * price[0] + reply.output_tokens * price[1]) / 1_000_000
+        usage = {
+            "model": model,
+            "cost": round(cost, 6),
+            "cost_estimated": not free and price is not None,
+            "free_tier": free,
+            "input_tokens": reply.input_tokens,
+            "output_tokens": reply.output_tokens,
+            "reasoning_tokens": reply.thought_tokens,
+            "web_searches": reply.searches,
+        }
+        return Completion(content=reply.text, cost=cost, usage=usage, sources=reply.sources)
+
+    async def test_search(self, place: str) -> dict[str, Any]:
+        """Run one tiny search through each request style and report what happened."""
+        prompt = f"Name two public events happening in or near {place} in the next two weeks, with a link for each."
+        report: dict[str, Any] = {}
+        self.retry_delays = (5,)  # a quick check: don't keep the user waiting through long back-offs
+        for api in self.SEARCH_APIS:
+            call = self._interact if api == "interactions" else self._generate
+            try:
+                reply = await call(self.search_model, self._search_key, "Answer briefly.", prompt, "low", search=True)
+            except ProviderError as err:
+                report[api] = {"searched": False, "error": str(err)}
+                continue
+            report[api] = {
+                "searched": reply.searched,
+                "searches": reply.searches,
+                "sources": reply.sources[:3],
+                "answer": reply.text[:300],
+                "error": None,
+            }
+        return report
+
+    # ------------------------------------------------------------ generateContent
+
+    async def _generate(
+        self, model: str, key: str, system: str, user: str, reasoning: str, *, search: bool
+    ) -> "_Reply":
         body: dict[str, Any] = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
-            "generationConfig": {"temperature": 0.2 if web_search else 0.1},
+            "generationConfig": {"temperature": 0.2 if search else 0.1},
         }
         thinking = _thinking_config(model, reasoning)
         if thinking:
             body["generationConfig"]["thinkingConfig"] = thinking
-        if web_search:
+        if search:
             body["tools"] = [{"google_search": {}}]
         data = await self._send(model, key, body)
-        if web_search and not _searched(data):
-            # Gemini decides for itself whether to search and sometimes answers from memory,
-            # which gives stale or invented events. Ask once more, insisting on a search.
-            body["contents"][0]["parts"][0]["text"] = (
-                user + "\n\nImportant: run Google searches now and use only events found in the results. "
-                "Do not answer from memory."
-            )
-            data = await self._send(model, key, body)
-            if not _searched(data):
-                raise ProviderError(
-                    "Gemini answered without running any Google searches, so its results were not used. "
-                    "Check that the search key comes from a Google Cloud project with billing turned on "
-                    "(Google Search is not available on the free tier)."
-                )
         candidates = data.get("candidates") or []
         if not candidates:
             reason = (data.get("promptFeedback") or {}).get("blockReason")
@@ -193,28 +268,46 @@ class GeminiProvider:
         text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and not p.get("thought"))
         meta = data.get("usageMetadata") or {}
         grounding = candidate.get("groundingMetadata") or {}
-        searches = (len(grounding.get("webSearchQueries") or []) or int(_searched(data))) if web_search else 0
-        input_tokens = (meta.get("promptTokenCount") or 0) + (meta.get("toolUsePromptTokenCount") or 0)
-        output_tokens = (meta.get("candidatesTokenCount") or 0) + (meta.get("thoughtsTokenCount") or 0)
-        free = (not web_search) and self._process_free
-        price = GEMINI_PRICES.get(model)
-        cost = 0.0 if free or not price else (input_tokens * price[0] + output_tokens * price[1]) / 1_000_000
-        sources = [
-            chunk["web"]["uri"]
-            for chunk in grounding.get("groundingChunks") or []
-            if isinstance(chunk, dict) and isinstance(chunk.get("web"), dict) and chunk["web"].get("uri")
-        ]
-        usage = {
-            "model": model,
-            "cost": round(cost, 6),
-            "cost_estimated": not free and price is not None,
-            "free_tier": free,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "reasoning_tokens": meta.get("thoughtsTokenCount"),
-            "web_searches": searches,
-        }
-        return Completion(content=text, cost=cost, usage=usage, sources=sources)
+        searched = search and _searched(data)
+        return _Reply(
+            text=text,
+            searched=searched,
+            searches=(len(grounding.get("webSearchQueries") or []) or int(searched)) if search else 0,
+            input_tokens=(meta.get("promptTokenCount") or 0) + (meta.get("toolUsePromptTokenCount") or 0),
+            output_tokens=(meta.get("candidatesTokenCount") or 0) + (meta.get("thoughtsTokenCount") or 0),
+            thought_tokens=meta.get("thoughtsTokenCount"),
+            sources=[
+                chunk["web"]["uri"]
+                for chunk in grounding.get("groundingChunks") or []
+                if isinstance(chunk, dict) and isinstance(chunk.get("web"), dict) and chunk["web"].get("uri")
+            ],
+        )
+
+    # --------------------------------------------------------------- Interactions
+
+    async def _interact(
+        self, model: str, key: str, system: str, user: str, reasoning: str, *, search: bool
+    ) -> "_Reply":
+        body: dict[str, Any] = {"model": model, "input": user, "system_instruction": system, "store": False}
+        if search:
+            body["tools"] = [{"type": "google_search"}]
+        if model.startswith("gemini-3"):
+            body["generation_config"] = {"thinking_level": "low"}
+
+        async def attempt() -> dict[str, Any]:
+            try:
+                return await self._post(model, key, body, path="/interactions")
+            except ProviderError as err:
+                if "generation_config" in body and not err.transient and "thinking" in str(err).lower():
+                    body.pop("generation_config", None)
+                    return await self._post(model, key, body, path="/interactions")
+                raise
+
+        data = await with_retries(attempt, delays=self.retry_delays)
+        if data.get("status") in ("failed", "cancelled"):
+            message = (data.get("error") or {}).get("message") if isinstance(data.get("error"), dict) else data.get("error")
+            raise ProviderError(f"Gemini could not complete the request: {message or data.get('status')}")
+        return _parse_interaction(data, search)
 
     async def _send(self, model: str, key: str, body: dict[str, Any]) -> dict[str, Any]:
         async def attempt() -> dict[str, Any]:
@@ -229,8 +322,8 @@ class GeminiProvider:
 
         return await with_retries(attempt, delays=self.retry_delays)
 
-    async def _post(self, model: str, key: str, body: dict[str, Any]) -> dict[str, Any]:
-        url = f"{GEMINI_BASE}/models/{model}:generateContent"
+    async def _post(self, model: str, key: str, body: dict[str, Any], path: str | None = None) -> dict[str, Any]:
+        url = f"{GEMINI_BASE}{path}" if path else f"{GEMINI_BASE}/models/{model}:generateContent"
         try:
             async with self._session.post(
                 url, json=body, headers={"x-goog-api-key": key}, timeout=self._timeout
@@ -257,6 +350,64 @@ class GeminiProvider:
                 f"Gemini returned HTTP {status}: {message}", transient=status in TRANSIENT_STATUS, retry_after=wait
             )
         return data
+
+
+@dataclass
+class _Reply:
+    text: str
+    searched: bool
+    searches: int
+    input_tokens: int
+    output_tokens: int
+    thought_tokens: int | None
+    sources: list[str]
+
+
+def _parse_interaction(data: dict[str, Any], search: bool) -> _Reply:
+    """Pull text, search evidence and usage out of an Interactions API response."""
+    steps = data.get("steps") or data.get("outputs") or []
+    texts: list[str] = []
+    sources: list[str] = []
+    search_steps = 0
+    queries = 0
+
+    def _content(parts: Any) -> None:
+        for part in parts if isinstance(parts, list) else []:
+            if not isinstance(part, dict) or part.get("type") not in (None, "text"):
+                continue
+            if part.get("text"):
+                texts.append(part["text"])
+            for note in part.get("annotations") or []:
+                if isinstance(note, dict) and note.get("url"):
+                    sources.append(note["url"])
+
+    for step in steps if isinstance(steps, list) else []:
+        if not isinstance(step, dict):
+            continue
+        kind = str(step.get("type") or "")
+        if "google_search" in kind:
+            search_steps += 1
+            queries += len((step.get("arguments") or {}).get("queries") or [])
+        elif kind in ("thought", "thoughts", "user_input"):
+            continue
+        elif kind == "text":
+            _content([step])
+        else:
+            _content(step.get("content"))
+    usage = data.get("usage") or {}
+    tool_tokens = usage.get("total_tool_use_tokens") or 0
+    grounding = usage.get("grounding_tool_count") or 0
+    searched = search and bool(search_steps or grounding or tool_tokens or sources)
+    thoughts = usage.get("total_thought_tokens")
+    return _Reply(
+        text="".join(texts),
+        searched=searched,
+        searches=(queries or grounding or search_steps or int(searched)) if search else 0,
+        input_tokens=(usage.get("total_input_tokens") or 0) + tool_tokens,
+        output_tokens=(usage.get("total_output_tokens") or 0) + (thoughts or 0),
+        thought_tokens=thoughts,
+        sources=list(dict.fromkeys(sources)),
+    )
 
 
 def _searched(data: dict[str, Any]) -> bool:

@@ -4,12 +4,13 @@ from homeassistant.const import Platform
 
 DOMAIN = "local_event_scout"
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.CALENDAR]
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 
 API_STATE = f"/api/{DOMAIN}/config"
 API_RUN = f"/api/{DOMAIN}/run"
 API_FEEDBACK = f"/api/{DOMAIN}/feedback"
 API_SOURCES = f"/api/{DOMAIN}/sources"
+API_TEST_SEARCH = f"/api/{DOMAIN}/test_search"
 
 PANEL_URL = DOMAIN
 PANEL_COMPONENT = "local-event-scout-panel"
