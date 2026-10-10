@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+
+# Windows build output
+windows/_staging/
+windows/build/
+windows/dist/

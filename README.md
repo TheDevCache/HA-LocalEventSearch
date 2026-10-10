@@ -2,6 +2,8 @@
 
 A Home Assistant integration that searches the web each night for local events matching your interests, scores them, and shows the best ones on a sidebar page and in a calendar.
 
+**Not using Home Assistant?** There's a Windows app with the same features: download `LocalEventScout.exe` from the [latest release](https://github.com/TheDevCache/HA-LocalEventSearch/releases/latest) and see [windows/README.md](windows/README.md).
+
 It works with either of two AI providers, chosen when you add the integration:
 
 - **[OpenRouter](https://openrouter.ai)**: any model, pay per use. The default model is `deepseek/deepseek-v4.1-flash`, and web search is OpenRouter's search tool.
@@ -71,7 +73,7 @@ The settings page shows the exact cost of every call in the last run.
 
 ## Developing
 
-Everything Event Scout does lives in `custom_components/local_event_scout/scout/`, which has no Home Assistant imports: `engine.py` holds the settings, results, scans, feedback, reports and sources, and each host (the Home Assistant integration, the upcoming Windows app) only adds storage, scheduling and its own UI hosting. You can run and tune the search on any PC:
+Everything Event Scout does lives in `custom_components/local_event_scout/scout/`, which has no Home Assistant imports: `engine.py` holds the settings, results, scans, feedback, reports and sources, and each host (the Home Assistant integration, and the Windows app in `windows/`) only adds storage, scheduling and its own page hosting. You can run and tune the search on any PC:
 
 ```bash
 pip install aiohttp pytest pytest-asyncio

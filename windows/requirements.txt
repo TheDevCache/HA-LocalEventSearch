@@ -1,0 +1,6 @@
+aiohttp>=3.9
+keyring>=24
+pystray>=0.19
+pillow>=10
+tzlocal>=5
+tzdata>=2024.1

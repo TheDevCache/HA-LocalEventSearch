@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Event Scout</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='6' y='10' width='52' height='48' rx='8' fill='%230b7fab'/%3E%3Crect x='6' y='10' width='52' height='14' rx='6' fill='%23075a7a'/%3E%3Ccircle cx='38' cy='40' r='9' fill='none' stroke='white' stroke-width='5'/%3E%3Cpath d='M44 46l8 8' stroke='white' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: light;
+    --primary-color: #0b7fab;
+    --accent-color: #e8590c;
+    --text-primary-color: #ffffff;
+    --primary-text-color: #1f2328;
+    --secondary-text-color: #5b6470;
+    --primary-background-color: #f4f5f7;
+    --secondary-background-color: #e7e9ed;
+    --card-background-color: #ffffff;
+    --divider-color: #d9dce1;
+    --error-color: #c62828;
+    --warning-color: #d98e04;
+    --success-color: #2e7d32;
+    --app-header-background-color: #0b7fab;
+    --app-header-text-color: #ffffff;
+    --ha-card-border-radius: 12px;
+    --ha-card-box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --primary-color: #4fb3dc;
+      --text-primary-color: #0d1117;
+      --primary-text-color: #e6e8eb;
+      --secondary-text-color: #9aa3ad;
+      --primary-background-color: #111418;
+      --secondary-background-color: #262b31;
+      --card-background-color: #1b1f24;
+      --divider-color: #333a42;
+      --ha-card-box-shadow: 0 1px 3px rgba(0, 0, 0, .5);
+    }
+  }
+  html, body { margin: 0; min-height: 100%; background: var(--primary-background-color); }
+  body { font-family: "Segoe UI", Roboto, system-ui, sans-serif; }
+  #update { display: none; padding: 10px 16px; background: var(--accent-color); color: #fff; text-align: center; font-size: 14px; }
+  #update a { color: #fff; font-weight: 600; }
+  #offline { display: none; padding: 40px 16px; text-align: center; color: var(--secondary-text-color); font-size: 16px; }
+</style>
+</head>
+<body>
+<div id="update"></div>
+<div id="offline">Event Scout isn't running. Start it from the Start menu (or the tray icon) and reload this page.</div>
+<script>
+  // The panel was written for Home Assistant; these stand in for the two HA elements it uses.
+  const ICONS = {
+    "mdi:thumb-up": ["👍", true], "mdi:thumb-up-outline": ["👍", false],
+    "mdi:thumb-down": ["👎", true], "mdi:thumb-down-outline": ["👎", false],
+    "mdi:eye-off": ["🙈", true], "mdi:eye-off-outline": ["🙈", false],
+    "mdi:calendar-plus": ["📅", false], "mdi:flag": ["🚩", true], "mdi:flag-outline": ["🚩", false],
+    "mdi:close": ["✕", true], "mdi:weather-cloudy-alert": ["⛈️", true],
+  };
+  customElements.define("ha-icon", class extends HTMLElement {
+    static get observedAttributes() { return ["icon"]; }
+    connectedCallback() { this.render(); }
+    attributeChangedCallback() { this.render(); }
+    render() {
+      const [glyph, solid] = ICONS[this.getAttribute("icon")] || ["•", true];
+      this.textContent = glyph;
+      this.style.cssText = `display:inline-block;width:20px;text-align:center;font-size:15px;line-height:20px;${solid ? "" : "filter:grayscale(1);opacity:.55;"}`;
+    }
+  });
+  customElements.define("ha-menu-button", class extends HTMLElement {});
+</script>
+<script type="module">
+  const hass = {
+    states: {},
+    async callApi(method, path, body) {
+      let response;
+      try {
+        response = await fetch(`/api/${path}`, {
+          method,
+          headers: { "Content-Type": "application/json", "X-Event-Scout": "1" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      } catch (err) {
+        document.getElementById("offline").style.display = "block";
+        throw { body: { message: "Event Scout isn't running." } };
+      }
+      document.getElementById("offline").style.display = "none";
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw { body: data };
+      return data;
+    },
+  };
+  await import("/panel/event-scout-panel.js");
+  await customElements.whenDefined("local-event-scout-panel");
+  const panel = document.createElement("local-event-scout-panel");
+  document.body.appendChild(panel);
+  panel.narrow = window.innerWidth < 600;
+  panel.hass = hass;
+  window.addEventListener("resize", () => { panel.narrow = window.innerWidth < 600; });
+
+  // Update notice.
+  const state = await hass.callApi("GET", "local_event_scout/config").catch(() => null);
+  if (state && state.update) {
+    const bar = document.getElementById("update");
+    const link = document.createElement("a");
+    link.href = String(state.update.url).startsWith("https://github.com/") ? state.update.url : "https://github.com/TheDevCache/HA-LocalEventSearch/releases";
+    link.target = "_blank";
+    link.rel = "noreferrer noopener";
+    link.textContent = "Download it";
+    bar.append(`Event Scout ${state.update.version} is available. `, link);
+    bar.style.display = "block";
+  }
+</script>
+</body>
+</html>

@@ -45,7 +45,7 @@ from .textutil import clean_str
 
 _LOGGER = logging.getLogger(__name__)
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 MAX_FEEDBACK = 100
 MAX_REPORTS = 200
@@ -161,6 +161,13 @@ class ScoutEngine:
 
     def now(self) -> datetime:
         return self._now()
+
+    def set_provider(self, provider: str, keys: dict[str, str]) -> None:
+        """Switch provider or keys (hosts whose keys are changed inside the app)."""
+        self.provider = provider
+        self._keys = dict(keys)
+        if provider != PROVIDER_GEMINI:
+            self.results["gemini_search_api"] = "auto"
 
     def utcnow_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -326,6 +333,7 @@ class ScoutEngine:
             "free_searches": GEMINI_FREE_SEARCHES if self.provider == PROVIDER_GEMINI else None,
             "next_due": self.next_due(),
             "calendar_token": self.results.get("calendar_token", ""),
+            "can_locate": self.home is not None,
         } | extra
 
     def _this_month(self) -> list[dict[str, Any]]:

@@ -1,0 +1,40 @@
+name: Release
+
+# Push a tag like v0.5.0 to build the Windows app and publish a GitHub release.
+# HACS also offers tagged releases to Home Assistant users.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the tag matches the version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path custom_components/local_event_scout/scout/engine.py -Pattern '^VERSION = "(.+)"').Matches[0].Groups[1].Value
+          $manifest = (Get-Content custom_components/local_event_scout/manifest.json | ConvertFrom-Json).version
+          if ("v$version" -ne "${{ github.ref_name }}" -or $manifest -ne $version) {
+            Write-Error "Tag ${{ github.ref_name }}, engine $version, manifest $manifest must all match"; exit 1
+          }
+      - run: pip install -r windows/requirements.txt pyinstaller aiohttp pytest pytest-asyncio
+      - run: pytest -q
+      - run: python windows/build.py
+      - name: Smoke test the .exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath windows\dist\LocalEventScout.exe -ArgumentList '--self-test','--report','selftest.txt' -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: windows/dist/LocalEventScout.exe
+          generate_release_notes: true

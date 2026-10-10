@@ -286,6 +286,11 @@ class LocalEventScoutPanel extends HTMLElement {
       if (e.target.dataset.action === "sort") {
         this._sort = e.target.value;
         this._renderBody();
+      } else if (e.target.dataset.action === "pv-provider") {
+        const form = e.target.closest(".provider-form");
+        form.querySelectorAll("[data-pv]").forEach((el) => { el.hidden = el.dataset.pv !== e.target.value; });
+      } else if (["app-autostart", "app-lan"].includes(e.target.dataset.action)) {
+        this._appSetting(e.target.dataset.action === "app-autostart" ? { autostart: e.target.checked } : { lan_feed: e.target.checked });
       } else if (e.target.dataset.action === "report-problem") {
         this._showReportFields(e.target.closest("form"));
       } else if (e.target.closest(".settings")) this._markDirty();
@@ -472,8 +477,8 @@ class LocalEventScoutPanel extends HTMLElement {
       </article>`;
   }
 
-  _feedUrl(suffix = ".ics") {
-    return `${window.location.origin}/api/${API}/calendar/${this._state.calendar_token}${suffix}`;
+  _feedUrl(suffix = ".ics", base = window.location.origin) {
+    return `${base}/api/${API}/calendar/${this._state.calendar_token}${suffix}`;
   }
 
   _addHtml(e) {
@@ -491,9 +496,14 @@ class LocalEventScoutPanel extends HTMLElement {
     return `
       <div class="card">
         <h2>Calendar feed</h2>
-        <p class="muted">Subscribe to your picks from a calendar app (in Outlook or Apple Calendar: add a calendar from the internet / subscription). It updates every few hours. Google Calendar fetches the feed from Google's servers, so it only works if this address is reachable from the internet, for example through Home Assistant Cloud remote access. Anyone with the link can see the events, so treat it like a password.</p>
+        <p class="muted">Subscribe to your picks from a calendar app (in Outlook or Apple Calendar: add a calendar from the internet / subscription). It updates every few hours.
+          ${this._state.host === "homeassistant"
+            ? "Google Calendar fetches the feed from Google's servers, so it only works if this address is reachable from the internet, for example through Home Assistant Cloud remote access."
+            : "The first link works on this computer. To use it on a phone or another computer at home, turn on network sharing under This app and use the network link. Google Calendar can't reach either."}
+          Anyone with the link can see the events, so treat it like a password.</p>
         ${row("feed-picks", "Picks and liked events", this._feedUrl())}
         ${row("feed-liked", "Liked events only", this._feedUrl(".ics?only=liked"))}
+        ${(this._state.app || {}).feed_base ? row("feed-lan", "On your home network", this._feedUrl(".ics", this._state.app.feed_base)) : ""}
         <p class="muted small" id="feed-note">${esc(this._feedNote || "")}</p>
         <button class="secondary" data-action="new-feed-link">Make a new link</button>
         <span class="muted small">The old link stops working.</span>
@@ -633,7 +643,7 @@ class LocalEventScoutPanel extends HTMLElement {
         <input id="w-region" placeholder="Province / state" value="${esc(loc.region || "")}">
         <input id="w-country" placeholder="Country" value="${esc(loc.country || "")}">
       </div>
-      <button class="secondary" data-action="w-locate" ${this._locating ? "disabled" : ""}>${this._locating ? "Looking up…" : this._state.host === "homeassistant" ? "Use Home Assistant's home location" : "Use my home location"}</button>
+      ${this._state.can_locate ? `<button class="secondary" data-action="w-locate" ${this._locating ? "disabled" : ""}>${this._locating ? "Looking up…" : this._state.host === "homeassistant" ? "Use Home Assistant's home location" : "Use my home location"}</button>` : ""}
       ${this._wizNav("Next", { back: false })}`;
   }
 
@@ -678,6 +688,13 @@ class LocalEventScoutPanel extends HTMLElement {
          Create or check keys at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer noopener">aistudio.google.com/apikey</a>.`
       : `Check the key at <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer noopener">openrouter.ai/settings/keys</a>:
          it needs credit, and a monthly limit above $0.`;
+    if (this._state.host !== "homeassistant" && !this._state.provider_ready) {
+      return `
+        <h3>Connect an AI</h3>
+        <p class="muted">Event Scout uses an AI model that can search the web. Google Gemini is the cheapest: most people pay nothing or a few cents a month.</p>
+        ${this._providerFormHtml()}
+        ${this._wizNav("Skip for now")}`;
+    }
     return `
       <h3>Check the AI connection</h3>
       <p class="muted">You're using ${gemini ? "Google Gemini" : "OpenRouter"}. This runs one small web search near ${esc((this._draft.locations[0] || {}).city || "you")}
@@ -909,8 +926,13 @@ class LocalEventScoutPanel extends HTMLElement {
             <span class="muted small">Runs one small search to check that your key can really search the web (costs a fraction of a cent).</span>
             ${this._testHtml()}
           </div>
-          <p class="muted small">AI provider: ${s.provider === "gemini" ? "Google Gemini" : "OpenRouter"}. To switch provider or change keys: Settings → Devices &amp; services → Local Event Scout → ⋮ → Reconfigure.</p>
+          ${s.host === "homeassistant"
+            ? `<p class="muted small">AI provider: ${s.provider === "gemini" ? "Google Gemini" : "OpenRouter"}. To switch provider or change keys: Settings → Devices &amp; services → Local Event Scout → ⋮ → Reconfigure.</p>`
+            : ""}
         </div>
+
+        ${s.host === "homeassistant" ? "" : `<div class="card"><h2>AI provider</h2>${this._providerFormHtml()}</div>`}
+        ${s.host === "homeassistant" ? "" : this._appHtml()}
 
         ${this._sourcesHtml(bucketOptions)}
 
@@ -1062,6 +1084,96 @@ class LocalEventScoutPanel extends HTMLElement {
       this._renderBody();
       return false;
     }
+  }
+
+  _providerFormHtml() {
+    const s = this._state;
+    const keys = s.keys_set || {};
+    const current = s.provider_ready ? s.provider : "gemini";
+    const saved = (name, fallback) => (keys[name] ? "Saved (leave empty to keep it)" : fallback);
+    const link = (href, text) => `<a href="${href}" target="_blank" rel="noreferrer noopener">${text}</a>`;
+    return `
+      <div class="provider-form">
+        ${s.provider_ready ? `<p class="ok-text small">Connected: ${s.provider === "gemini" ? "Google Gemini" : "OpenRouter"}.</p>` : ""}
+        <label>Provider <select id="pv-provider" data-action="pv-provider">
+          <option value="gemini" ${current === "gemini" ? "selected" : ""}>Google Gemini (AI Studio keys, mostly free)</option>
+          <option value="openrouter" ${current === "openrouter" ? "selected" : ""}>OpenRouter (any model, pay per use)</option>
+        </select></label>
+        <div data-pv="gemini" ${current === "gemini" ? "" : "hidden"}>
+          <label>Search key (project with billing turned on)
+            <input id="pv-gemini_search_key" type="password" autocomplete="off" placeholder="${saved("gemini_search_key", "AIza…")}"></label>
+          <label>Free-tier key (optional)
+            <input id="pv-gemini_key" type="password" autocomplete="off" placeholder="${saved("gemini_key", "Optional")}"></label>
+          <p class="muted small">Create keys at ${link("https://aistudio.google.com/apikey", "aistudio.google.com/apikey")}. Google Search only works with a key
+            from a project with billing turned on; it includes 5,000 free searches a month and you pay only a fraction of a cent in tokens per search.
+            A second key from a free-tier project is used for everything else, at no cost.</p>
+        </div>
+        <div data-pv="openrouter" ${current === "openrouter" ? "" : "hidden"}>
+          <label>API key <input id="pv-api_key" type="password" autocomplete="off" placeholder="${saved("api_key", "sk-or-…")}"></label>
+          <label>Model <input id="pv-model" value="${esc(s.config.model)}"></label>
+          <p class="muted small">Create a key at ${link("https://openrouter.ai/settings/keys", "openrouter.ai/settings/keys")} and set a monthly spending limit on it.</p>
+        </div>
+        <div class="form-actions">
+          <button class="primary" data-action="pv-save" ${this._pvBusy ? "disabled" : ""}>${this._pvBusy ? "Checking…" : "Save and check the key"}</button>
+        </div>
+        <p class="muted small">Keys are kept in ${esc((s.app || {}).key_store === "file" ? "a private file in the app's data folder" : "Windows Credential Manager")} and never shown in this page.</p>
+      </div>`;
+  }
+
+  async _saveProvider() {
+    const root = this.shadowRoot;
+    const provider = root.getElementById("pv-provider").value;
+    const body = { provider };
+    const fields = provider === "gemini" ? ["gemini_search_key", "gemini_key"] : ["api_key", "model"];
+    for (const name of fields) {
+      const value = root.getElementById(`pv-${name}`).value.trim();
+      if (value || name === "model") body[name] = value;
+    }
+    this._error = "";
+    this._pvBusy = true;
+    this._keepDraft();
+    this._renderBody();
+    try {
+      const state = await this._api("POST", "provider", body);
+      this._notice = state.message || "Saved.";
+      this._testResult = null;
+      this._pvBusy = false;
+      this._setState(state);
+    } catch (err) {
+      this._pvBusy = false;
+      this._error = err.message;
+      this._renderBody();
+    }
+    this._renderHeader();
+  }
+
+  _appHtml() {
+    const a = this._state.app || {};
+    const update = this._state.update;
+    return `
+      <div class="card">
+        <h2>This app</h2>
+        <label class="check"><input type="checkbox" data-action="app-autostart" ${a.autostart ? "checked" : ""} ${a.autostart_supported ? "" : "disabled"}>
+          Start with Windows (in the background, so the nightly search runs)</label>
+        <label class="check"><input type="checkbox" data-action="app-lan" ${a.lan_feed ? "checked" : ""}>
+          Share the calendar feed with other devices on my network (for a phone or another computer)</label>
+        <p class="muted small">Event Scout searches at the nightly time only while this computer is on and the app is running (it sits in the
+          tray, near the clock). If the computer was off, the missed search runs shortly after the app starts.</p>
+        <p class="muted small">Version ${esc(a.version || "")}${update ? ` · <a href="${esc(update.url)}" target="_blank" rel="noreferrer noopener">Version ${esc(update.version)} is available</a>` : ""}
+          · Data folder: <code>${esc(a.data_dir || "")}</code></p>
+        <button class="secondary" data-action="app-update">Check for updates</button>
+      </div>`;
+  }
+
+  async _appSetting(body) {
+    this._error = "";
+    try {
+      this._setState(await this._api("POST", "app", body));
+    } catch (err) {
+      this._error = err.message;
+      this._renderBody();
+    }
+    this._renderHeader();
   }
 
   _troubleHtml() {
@@ -1249,6 +1361,17 @@ class LocalEventScoutPanel extends HTMLElement {
       await this._discover();
     } else if (action === "discover-save") {
       await this._saveDiscovered();
+    } else if (action === "pv-save") {
+      await this._saveProvider();
+    } else if (action === "app-update") {
+      try {
+        const state = await this._api("POST", "update", {});
+        this._notice = state.update ? `Version ${state.update.version} is available.` : "You have the latest version.";
+        this._setState(state);
+      } catch (err) {
+        this._error = err.message;
+      }
+      this._renderHeader();
     } else if (action === "debug") {
       await this._debug();
     } else if (action === "test-search") {
@@ -1421,6 +1544,11 @@ const STYLES = `
   .help { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: var(--secondary-background-color); }
   .help a, .muted a { color: var(--primary-color); }
   .summary-list { padding-left: 20px; line-height: 1.8; }
+  .provider-form { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
+  .provider-form label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--secondary-text-color); }
+  .provider-form [data-pv] { display: flex; flex-direction: column; gap: 10px; }
+  .provider-form [hidden] { display: none !important; }
+  code { font-size: 12px; overflow-wrap: anywhere; }
   .discover { margin: 14px 0 6px; padding-top: 12px; border-top: 1px solid var(--divider-color); }
   .discover > button { margin: 0 10px 0 0; }
   .disc-list { margin: 10px 0; }
