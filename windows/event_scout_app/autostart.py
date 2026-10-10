@@ -24,7 +24,7 @@ def enabled() -> bool:
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
             value, _ = winreg.QueryValueEx(key, VALUE)
-            return bool(value)
+            return value == _command()  # an entry for a moved or older copy doesn't count
     except OSError:
         return False
 

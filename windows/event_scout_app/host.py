@@ -184,10 +184,16 @@ class AppHost:
         if "autostart" in body:
             autostart.set_enabled(bool(body["autostart"]))
         if "lan_feed" in body:
+            previous = self.settings.lan_feed
             self.settings.lan_feed = bool(body["lan_feed"])
-            self.settings.save(self.data_dir)
-            if self.on_lan_change:
-                await self.on_lan_change()
+            try:
+                if self.on_lan_change:
+                    await self.on_lan_change()
+            except ValueError:
+                self.settings.lan_feed = previous
+                raise
+            finally:
+                self.settings.save(self.data_dir)
         return self.public_state()
 
     # ------------------------------------------------------------------- scans
@@ -251,6 +257,8 @@ class AppHost:
                     target = self._next_run(datetime.now(self.tz))  # the time was changed
                 except asyncio.TimeoutError:
                     pass
+            if (datetime.now(self.tz) - target).total_seconds() > 180:
+                await asyncio.sleep(120)  # the PC just woke up: give the network a moment to come back
             if self.engine.config["locations"] and self.engine.config["interests"]:
                 _LOGGER.info("Nightly search")
                 self.start_scan(force=False)

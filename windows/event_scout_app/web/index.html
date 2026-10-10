@@ -86,8 +86,10 @@
         throw { body: { message: "Event Scout isn't running." } };
       }
       document.getElementById("offline").style.display = "none";
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw { body: data };
+      const text = await response.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { message: text || response.statusText }; }
+      if (!response.ok) throw { body: data.message ? data : { message: text || `${response.status} ${response.statusText}` } };
       return data;
     },
   };

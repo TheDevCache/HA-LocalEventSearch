@@ -279,8 +279,10 @@ class LocalEventScoutPanel extends HTMLElement {
     );
     const body = this.shadowRoot.getElementById("body");
     body.addEventListener("click", (e) => this._onClick(e));
+    // The provider form and app switches save on their own; they aren't unsaved settings.
+    const ownSave = (el) => el.closest(".provider-form") || (el.dataset.action || "").startsWith("app-");
     body.addEventListener("input", (e) => {
-      if (e.target.closest(".settings")) this._markDirty();
+      if (e.target.closest(".settings") && !ownSave(e.target)) this._markDirty();
     });
     body.addEventListener("change", (e) => {
       if (e.target.dataset.action === "sort") {
@@ -293,7 +295,7 @@ class LocalEventScoutPanel extends HTMLElement {
         this._appSetting(e.target.dataset.action === "app-autostart" ? { autostart: e.target.checked } : { lan_feed: e.target.checked });
       } else if (e.target.dataset.action === "report-problem") {
         this._showReportFields(e.target.closest("form"));
-      } else if (e.target.closest(".settings")) this._markDirty();
+      } else if (e.target.closest(".settings") && !ownSave(e.target)) this._markDirty();
     });
   }
 
@@ -1104,6 +1106,7 @@ class LocalEventScoutPanel extends HTMLElement {
             <input id="pv-gemini_search_key" type="password" autocomplete="off" placeholder="${saved("gemini_search_key", "AIza…")}"></label>
           <label>Free-tier key (optional)
             <input id="pv-gemini_key" type="password" autocomplete="off" placeholder="${saved("gemini_key", "Optional")}"></label>
+          ${keys.gemini_key ? '<label class="check"><input type="checkbox" id="pv-clear-free"> Remove the saved free-tier key</label>' : ""}
           <p class="muted small">Create keys at ${link("https://aistudio.google.com/apikey", "aistudio.google.com/apikey")}. Google Search only works with a key
             from a project with billing turned on; it includes 5,000 free searches a month and you pay only a fraction of a cent in tokens per search.
             A second key from a free-tier project is used for everything else, at no cost.</p>
@@ -1129,6 +1132,7 @@ class LocalEventScoutPanel extends HTMLElement {
       const value = root.getElementById(`pv-${name}`).value.trim();
       if (value || name === "model") body[name] = value;
     }
+    if (provider === "gemini" && root.getElementById("pv-clear-free")?.checked) body.gemini_key = "";
     this._error = "";
     this._pvBusy = true;
     this._keepDraft();
@@ -1139,6 +1143,7 @@ class LocalEventScoutPanel extends HTMLElement {
       this._testResult = null;
       this._pvBusy = false;
       this._setState(state);
+      if (this._draft) this._draft.model = state.config.model; // keep unsaved settings from reverting it
     } catch (err) {
       this._pvBusy = false;
       this._error = err.message;
@@ -1157,6 +1162,7 @@ class LocalEventScoutPanel extends HTMLElement {
           Start with Windows (in the background, so the nightly search runs)</label>
         <label class="check"><input type="checkbox" data-action="app-lan" ${a.lan_feed ? "checked" : ""}>
           Share the calendar feed with other devices on my network (for a phone or another computer)</label>
+        <p class="muted small">Only the calendar feed is shared. Windows Firewall may ask to allow it, and it only works on networks set to Private.</p>
         <p class="muted small">Event Scout searches at the nightly time only while this computer is on and the app is running (it sits in the
           tray, near the clock). If the computer was off, the missed search runs shortly after the app starts.</p>
         <p class="muted small">Version ${esc(a.version || "")}${update ? ` · <a href="${esc(update.url)}" target="_blank" rel="noreferrer noopener">Version ${esc(update.version)} is available</a>` : ""}
@@ -1546,6 +1552,7 @@ const STYLES = `
   .summary-list { padding-left: 20px; line-height: 1.8; }
   .provider-form { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
   .provider-form label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--secondary-text-color); }
+  .provider-form label.check { flex-direction: row; align-items: center; margin-top: 0; }
   .provider-form [data-pv] { display: flex; flex-direction: column; gap: 10px; }
   .provider-form [hidden] { display: none !important; }
   code { font-size: 12px; overflow-wrap: anywhere; }

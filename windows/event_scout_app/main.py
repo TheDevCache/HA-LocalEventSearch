@@ -23,6 +23,25 @@ from .settings import AppSettings, default_data_dir
 _LOGGER = logging.getLogger("event_scout_app")
 
 
+def _already_running() -> bool:
+    """Windows: a named mutex tells a second copy that one is already running (even mid-start)."""
+    if sys.platform != "win32":
+        return False
+    import ctypes  # noqa: PLC0415
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    App._mutex = kernel32.CreateMutexW(None, False, "Local\\LocalEventScout")
+    return ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
+
+
+def _show_error(text: str) -> None:
+    if sys.platform == "win32":
+        import ctypes  # noqa: PLC0415
+
+        ctypes.windll.user32.MessageBoxW(None, text, "Local Event Scout", 0x10)
+
+
 def _port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.5)
@@ -42,6 +61,8 @@ def _setup_logging(data_dir: Path, verbose: bool) -> None:
 
 
 class App:
+    _mutex = None  # kept alive for the life of the process
+
     def __init__(self, data_dir: Path, port: int | None) -> None:
         self.data_dir = data_dir
         self.port = port or AppSettings.load(data_dir).port
@@ -49,13 +70,14 @@ class App:
         self.host: AppHost | None = None
         self.server: Server | None = None
         self.ready = threading.Event()
+        self.failed: BaseException | None = None
+        self._stop = asyncio.Event()
 
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/"
 
     async def run(self) -> None:
-        self._stop = asyncio.Event()
         async with aiohttp.ClientSession() as session:
             self.host = AppHost(self.data_dir, session)
             await self.host.start()
@@ -71,8 +93,11 @@ class App:
             await self.server.stop()
 
     def stop(self) -> None:
-        if self.loop:
-            self.loop.call_soon_threadsafe(self._stop.set)
+        if self.loop and not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(self._stop.set)
+            except RuntimeError:  # the loop already finished
+                pass
 
     def search_now(self) -> None:
         if self.loop and self.host:
@@ -100,6 +125,11 @@ def _run_loop(app: App) -> None:
     asyncio.set_event_loop(app.loop)
     try:
         app.loop.run_until_complete(app.run())
+    except BaseException as err:  # noqa: BLE001 - record why the app couldn't run
+        if not isinstance(err, KeyboardInterrupt):
+            _LOGGER.exception("Event Scout stopped with an error")
+            app.failed = err
+        app.ready.set()
     finally:
         app.loop.close()
 
@@ -139,6 +169,13 @@ async def self_test(report: Path | None = None) -> int:
                     checks.append(("calendar feed", r.status == 200 and (await r.text()).startswith("BEGIN:VCALENDAR")))
                 async with session.get(f"{base}/api/local_event_scout/calendar/wrong.ics") as r:
                     checks.append(("feed token", r.status == 404))
+                if sys.platform == "win32":
+                    try:
+                        from . import tray  # noqa: F401, PLC0415 - catches a missing tray library in the build
+
+                        checks.append(("tray library", True))
+                    except Exception:  # noqa: BLE001
+                        checks.append(("tray library", False))
             finally:
                 await server.stop()
                 await host.stop()
@@ -176,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging(data_dir, args.verbose)
     app = App(data_dir, args.port)
 
-    if _port_in_use(app.port):
+    if _already_running() or _port_in_use(app.port):
         # Already running (or another program has the port): show the page and leave.
         _LOGGER.info("Event Scout is already running; opening %s", app.url)
         if not args.background:
@@ -203,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
         worker = threading.Thread(target=_run_loop, args=(app,), daemon=True)
         worker.start()
         app.ready.wait(30)
+        if app.failed or not app.ready.is_set():
+            reason = app.failed or "it took too long to start"
+            _show_error(f"Event Scout couldn't start: {reason}\n\nDetails are in {data_dir / 'event-scout.log'}")
+            return 1
         run_tray(open_page=app.open_page, search_now=app.search_now, check_updates=app.check_updates, quit_app=app.stop)
         worker.join(timeout=10)
         return 0
@@ -211,4 +252,4 @@ def main(argv: list[str] | None = None) -> int:
         _run_loop(app)
     except KeyboardInterrupt:
         pass
-    return 0
+    return 1 if app.failed else 0
