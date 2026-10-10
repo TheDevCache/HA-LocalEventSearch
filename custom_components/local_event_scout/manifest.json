@@ -1,0 +1,13 @@
+{
+  "domain": "local_event_scout",
+  "name": "Local Event Scout",
+  "codeowners": ["@TheDevCache"],
+  "config_flow": true,
+  "dependencies": ["frontend", "http", "panel_custom"],
+  "documentation": "https://github.com/TheDevCache/HA-LocalEventSearch",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/TheDevCache/HA-LocalEventSearch/issues",
+  "requirements": [],
+  "version": "0.3.4"
+}
