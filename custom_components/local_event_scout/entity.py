@@ -24,7 +24,7 @@ class EventScoutEntity(Entity):
             identifiers={(DOMAIN, entry_id)},
             name="Event Scout",
             manufacturer="HA-EventSearch",
-            model="OpenRouter event search",
+            model="AI event search",
             sw_version=VERSION,
             entry_type=DeviceEntryType.SERVICE,
         )

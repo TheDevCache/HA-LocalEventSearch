@@ -585,9 +585,12 @@ class LocalEventScoutPanel extends HTMLElement {
             <label>Search model (billing project) <input id="gemini_search_model" value="${esc(c.gemini_search_model)}"></label>
             <label>Model for everything else <input id="gemini_model" value="${esc(c.gemini_model)}"></label>` : `
             <label>Model <input id="model" value="${esc(c.model)}"></label>
-            <label>Search engine <select id="search_engine">${engines}</select></label>
-            <label>Web searches per group <input id="searches_per_group" type="number" min="1" max="10" value="${c.searches_per_group}">
-              <span class="hint">Each costs about half a cent plus reading time. More finds more.</span></label>`}
+            <label>Search engine <select id="search_engine">${engines}</select></label>`}
+            <label>${s.provider === "gemini" ? "Searches per group" : "Web searches per group"}
+              <input id="searches_per_group" type="number" min="1" max="10" value="${c.searches_per_group}">
+              <span class="hint">${s.provider === "gemini"
+                ? "Each is a separate Google search on different interests. Free up to 5,000 a month; a fraction of a cent in tokens each."
+                : "Each costs about half a cent plus reading time. More finds more."}</span></label>
             <label>Interests per search <input id="interests_per_search" type="number" min="1" max="20" value="${c.interests_per_search}">
               <span class="hint">Fewer means deeper searches; the rest take turns on later runs.</span></label>
           </div>
@@ -750,7 +753,7 @@ class LocalEventScoutPanel extends HTMLElement {
     if (opt("gemini_model")) c.gemini_model = opt("gemini_model").value.trim();
     if (opt("gemini_search_model")) c.gemini_search_model = opt("gemini_search_model").value.trim();
     c.discovery_days = Number(opt("discovery_days").value);
-    if (opt("searches_per_group")) c.searches_per_group = Number(opt("searches_per_group").value);
+    c.searches_per_group = Number(opt("searches_per_group").value);
     c.interests_per_search = Number(opt("interests_per_search").value);
     c.check_links = opt("check_links").checked;
     c.auto_sources = opt("auto_sources").checked;

@@ -9,6 +9,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .const import GEMINI_FREE_SEARCHES
 from .entity import EventScoutEntity
 
 STATUS_OPTIONS = ["never", "ok", "scanning", "error", "budget"]
@@ -48,7 +49,7 @@ class StatusSensor(EventScoutEntity, SensorEntity):
             "candidates": last.get("candidates"),
             "kept": last.get("kept"),
             "new": last.get("new"),
-            "next_due": self.coordinator._next_due(),  # noqa: SLF001
+            "next_due": self.coordinator.next_due(),
         }
 
 
@@ -115,7 +116,7 @@ class WebSearchesSensor(EventScoutEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        free = 5000 if self.coordinator.provider == "gemini" else None
+        free = GEMINI_FREE_SEARCHES if self.coordinator.provider == "gemini" else None
         return {"free_per_month": free} if free else {}
 
 

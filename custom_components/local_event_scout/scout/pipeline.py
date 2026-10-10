@@ -78,6 +78,8 @@ class ScoutPipeline:
         geocode_cache: dict[str, Any] | None = None,
         check_links: bool = True,
         interests_per_search: int = DEFAULT_INTERESTS_PER_SEARCH,
+        search_calls: int = 1,
+        explain: Callable[[Exception], str] = str,
     ) -> None:
         self._session = session
         self._llm = llm
@@ -87,6 +89,8 @@ class ScoutPipeline:
         self._check_links = check_links
         self._interests_per_search = max(1, int(interests_per_search))
         self._corrections: list[str] = []
+        self._search_calls = max(1, int(search_calls))
+        self._explain = explain
 
     async def run(
         self,
@@ -142,27 +146,38 @@ class ScoutPipeline:
                     raw_batches.append((home, bucket, events, "source"))
 
         # 2. Web search, two at a time, each on a rotating subset of the group's interests.
+        #    With several search calls per group, each call covers a different subset.
         focus = {
-            b.id: pick_interests(profile.interests_for(b.id), interest_last_searched or {}, self._interests_per_search)
+            b.id: split_interests(
+                pick_interests(
+                    profile.interests_for(b.id),
+                    interest_last_searched or {},
+                    self._interests_per_search * self._search_calls,
+                ),
+                self._interests_per_search,
+                self._search_calls,
+            )
             for b in active
             if b.id in search_ids
         }
-        for chosen in focus.values():
-            result.interests_searched.extend(i.name for i in chosen)
-        jobs = [(loc, b) for b in active if b.id in search_ids for loc in profile.locations]
+        for chunks in focus.values():
+            result.interests_searched.extend(i.name for chunk in chunks for i in chunk)
+        jobs = [
+            (loc, b, chunk) for b in active if b.id in search_ids for chunk in focus[b.id] for loc in profile.locations
+        ]
         if jobs:
             semaphore = asyncio.Semaphore(2)
             done = 0
 
-            async def _search(loc: Location, bucket: Bucket):
+            async def _search(loc: Location, bucket: Bucket, interests: list[Interest]):
                 nonlocal done
                 async with semaphore:
                     try:
                         events = await self._search(
-                            loc, bucket, focus[bucket.id], (known_events or {}).get(bucket.id, []), profile, today, result
+                            loc, bucket, interests, (known_events or {}).get(bucket.id, []), profile, today, result
                         )
                     except OpenRouterError as err:
-                        result.errors.append(f"{bucket.label} search near {loc.city}: {err}")
+                        result.errors.append(f"{bucket.label} search near {loc.city}: {self._explain(err)}")
                         result.failed_buckets.append(bucket.id)
                         result.transient_failure |= getattr(err, "transient", False)
                         events = []
@@ -295,7 +310,7 @@ class ScoutPipeline:
         try:
             events = await self._call_for_events("source", label, prompts.EXTRACT_SYSTEM, prompt, False, result)
         except OpenRouterError as err:
-            result.errors.append(f"Reading saved sources failed: {err}")
+            result.errors.append(f"Reading saved sources failed: {self._explain(err)}")
             result.transient_failure |= getattr(err, "transient", False)
             for page in pages:
                 # Don't count a model outage against the source's health.
@@ -477,7 +492,7 @@ class ScoutPipeline:
                     if attempt:
                         result.errors.append(f"Ranking failed: {err}")
                 except OpenRouterError as err:
-                    result.errors.append(f"Ranking failed: {err}")
+                    result.errors.append(f"Ranking failed: {self._explain(err)}")
                     result.transient_failure |= getattr(err, "transient", False)
                     break
             if parsed is None:
@@ -549,6 +564,14 @@ def pick_interests(interests: list[Interest], last_searched: dict[str, str], lim
         key=lambda i: (last_searched.get(i.name, ""), i.priority == "low"),
     )
     return (high + rest)[: max(limit, len(high))]
+
+
+def split_interests(interests: list[Interest], per_call: int, calls: int) -> list[list[Interest]]:
+    """Share interests between up to ``calls`` searches of about ``per_call`` interests each."""
+    if not interests:
+        return []
+    size = max(per_call, -(-len(interests) // max(1, calls)))
+    return [interests[i : i + size] for i in range(0, len(interests), size)]
 
 
 def _match_interest(text: str, interests: list[Interest]) -> Interest | None:

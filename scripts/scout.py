@@ -115,7 +115,7 @@ async def main() -> None:
     parser.add_argument("--model", help="OpenRouter model, or the Gemini model for non-search calls")
     parser.add_argument("--search-model", help="Gemini model for search calls")
     parser.add_argument("--engine", default="auto", choices=["auto", "exa", "parallel", "native"])
-    parser.add_argument("--searches", type=int, default=2, help="web searches per group (OpenRouter)")
+    parser.add_argument("--searches", type=int, default=2, help="OpenRouter: web searches per group call; Gemini: separate search calls per group")
     parser.add_argument("--interests-per-search", type=int, default=3, help="interests covered by each search")
     parser.add_argument("--timezone", help="IANA time zone, e.g. America/Chicago (default: this computer's)")
     parser.add_argument("--min-score", type=int, default=5)
@@ -133,6 +133,7 @@ async def main() -> None:
         pipeline = ScoutPipeline(
             session, build_provider(args, session), tz=tz, tz_name=tz_name, check_links=not args.no_links,
             interests_per_search=args.interests_per_search,
+            search_calls=args.searches if args.provider == "gemini" else 1,
         )
         result = await pipeline.run(
             profile,
