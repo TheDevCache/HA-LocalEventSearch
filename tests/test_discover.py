@@ -72,3 +72,11 @@ async def test_engine_discover_and_add_many(monkeypatch):
         picked = [{"url": s["url"], "name": s["name"], "bucket": "local"} for s in found["sources"][:2]]
         await engine.source_action({"action": "add_many", "sources": picked})
     assert [s["origin"] for s in engine.results["sources"]] == ["discovered", "discovered"]
+
+
+async def test_discovered_source_names_survive_a_restart():
+    async with aiohttp.ClientSession() as session:
+        engine, storage = await make_engine(session, FakeLLM({}))
+        await engine.source_action({"action": "add_many", "sources": [{"url": "https://riverton.example/events", "name": "City calendar"}]})
+        again, _ = await make_engine(session, FakeLLM({}), results=storage.results)
+    assert again.results["sources"][0]["name"] == "City calendar"

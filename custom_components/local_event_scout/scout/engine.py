@@ -152,7 +152,7 @@ class ScoutEngine:
         self.config = self.validate_config({**DEFAULT_CONFIG, "model": default_model or DEFAULT_MODEL, **stored})
         self.results = {**empty_results(), **(await self.storage.load_results() or {})}
         for source in self.results["sources"]:
-            if source.get("origin") != "manual":
+            if source.get("origin") in ("auto", "liked"):
                 source["name"] = host_of(source["url"])  # older versions named auto sources after a venue
         if not self.results.get("calendar_token"):
             self.results["calendar_token"] = secrets.token_urlsafe(24)
@@ -391,7 +391,7 @@ class ScoutEngine:
 
     def _token_ok(self, token: str) -> bool:
         expected = self.results.get("calendar_token") or ""
-        return bool(expected) and secrets.compare_digest(str(token), expected)
+        return bool(expected) and secrets.compare_digest(str(token).encode(), expected.encode())
 
     def calendar_feed(self, token: str, only: str = "") -> str | None:
         """The picks (or only liked events) as an .ics feed; None when the token is wrong."""
@@ -743,16 +743,21 @@ class ScoutEngine:
         return known
 
     async def _scan(self, force: bool, followup: bool = False) -> None:
+        used_ai = False
         try:
             bucket_ids = self.due_buckets(force)
             if not bucket_ids and not (followup and self.unscored()):
                 _LOGGER.debug("Scheduled check: no distance group is due")
                 return
             await self._run_scan(bucket_ids, force, followup)
+            last = self.results.get("last_run") or {}
+            used_ai = bool(last.get("searches") or last.get("pages_read"))
         finally:
             self.scanning = False
             self.progress = ""
             self.notify()
+        if used_ai:
+            await self.refresh_spend()  # after the scan is marked finished
 
     async def _run_scan(self, bucket_ids: list[str], force: bool, followup: bool) -> None:
         started = self.now()
@@ -879,8 +884,6 @@ class ScoutEngine:
             self.results["run_history"] = (self.results["run_history"] + [history_entry])[-MAX_RUN_HISTORY:]
             self.prune()
             await self.save_results()
-            if run.get("searches") or run.get("pages_read"):
-                await self.refresh_spend()
 
     def merge_events(self, events: list[dict[str, Any]]) -> int:
         """Add new events and refresh known ones. Nothing is removed here (see prune)."""

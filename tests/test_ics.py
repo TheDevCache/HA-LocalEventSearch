@@ -41,3 +41,9 @@ async def test_feed_needs_the_right_token():
         assert engine.event_ics(token, event_id).count("BEGIN:VEVENT") == 1
         await engine.new_calendar_token()
         assert engine.calendar_feed(token) is None
+
+
+async def test_odd_tokens_are_refused_not_crashing():
+    async with aiohttp.ClientSession() as session:
+        engine, _ = await make_engine(session, FakeLLM(SEARCH))
+    assert engine.calendar_feed("é") is None and engine.event_ics("ü", "x") is None

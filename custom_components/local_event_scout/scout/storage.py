@@ -63,8 +63,9 @@ class JsonFileStorage:
                 data = json.load(handle)
         except FileNotFoundError:
             return None
-        except (OSError, json.JSONDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError):
             # Keep a damaged file for inspection and start fresh rather than refusing to run.
+            # (Other read errors, such as a locked file, are raised so good data is never set aside.)
             path.replace(path.with_suffix(".damaged.json"))
             return None
         return data if isinstance(data, dict) else None

@@ -733,6 +733,7 @@ class LocalEventScoutPanel extends HTMLElement {
         country: root.getElementById("w-country").value.trim(),
       };
     }
+    if (root.querySelector("[data-disc]")) this._collectDiscovered();
     root.querySelectorAll(".w-int").forEach((row) => {
       const it = this._draft.interests[Number(row.dataset.index)];
       if (!it) return;
@@ -1019,7 +1020,7 @@ class LocalEventScoutPanel extends HTMLElement {
     this._discoverError = "";
     this._discovering = true;
     this._discovered = null;
-    if (this._dirty) this._draft = this._collect();
+    this._keepDraft();
     this._renderBody();
     try {
       const found = await this._api("POST", "discover", {});
@@ -1047,7 +1048,7 @@ class LocalEventScoutPanel extends HTMLElement {
       return false;
     }
     try {
-      if (this._dirty) this._draft = this._collect();
+      this._keepDraft();
       this._setState(await this._api("POST", "sources", {
         action: "add_many", sources: chosen.map(({ url, name, bucket }) => ({ url, name, bucket })),
       }));
@@ -1079,7 +1080,7 @@ class LocalEventScoutPanel extends HTMLElement {
   async _debug() {
     this._error = "";
     this._debugBusy = true;
-    if (this._dirty) this._draft = this._collect();
+    this._keepDraft();
     this._renderBody();
     try {
       const info = await this._api("GET", "debug");
@@ -1120,7 +1121,7 @@ class LocalEventScoutPanel extends HTMLElement {
     this._error = "";
     this._testing = true;
     this._testResult = null;
-    if (this._dirty) this._draft = this._collect();
+    this._keepDraft();
     this._renderBody();
     try {
       this._testResult = await this._api("POST", "test_search", {});
@@ -1140,6 +1141,11 @@ class LocalEventScoutPanel extends HTMLElement {
       this._error = err.message;
     }
     this._renderHeader();
+  }
+
+  // Pick up unsaved Settings edits, but only while the Settings form is on screen.
+  _keepDraft() {
+    if (this._dirty && this._tab === "settings" && this.shadowRoot.querySelector(".settings")) this._draft = this._collect();
   }
 
   _markDirty() {
@@ -1232,7 +1238,9 @@ class LocalEventScoutPanel extends HTMLElement {
     } else if (action === "save") {
       await this._save();
     } else if (action === "open-guide") {
-      if (this._dirty) this._draft = this._collect();
+      if (this._dirty) this._notice = "Unsaved changes on the Settings tab were left out.";
+      this._draft = JSON.parse(JSON.stringify(this._state.config));
+      this._dirty = false;
       this._wizard = { step: 1 };
       this._tab = "events";
       this._renderHeader();

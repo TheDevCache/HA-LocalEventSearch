@@ -47,6 +47,14 @@ class _ScoutView(HomeAssistantView):
         return body
 
 
+def _for_user(request: web.Request, state: dict) -> dict:
+    """The calendar link works without logging in, so only administrators get it."""
+    user = request.get("hass_user")
+    if user is None or not user.is_admin:
+        return {k: v for k, v in state.items() if k != "calendar_token"}
+    return state
+
+
 class EventScoutStateView(_ScoutView):
     """GET current state; POST updated settings."""
 
@@ -54,7 +62,7 @@ class EventScoutStateView(_ScoutView):
     name = f"api:{DOMAIN}:config"
 
     async def get(self, request: web.Request) -> web.Response:
-        return self.json(self._get(request).public_state())
+        return self.json(_for_user(request, self._get(request).public_state()))
 
     async def post(self, request: web.Request) -> web.Response:
         self._require_admin(request)
@@ -99,7 +107,7 @@ class EventScoutFeedbackView(_ScoutView):
             state = await coordinator.async_set_feedback(str(body.get("id")), verdict)
         except KeyError:
             return self.json_message("Event not found (it may have expired).", HTTPStatus.NOT_FOUND)
-        return self.json(state)
+        return self.json(_for_user(request, state))
 
 
 class EventScoutReportView(_ScoutView):
@@ -117,7 +125,7 @@ class EventScoutReportView(_ScoutView):
             return self.json_message("Event not found (it may have expired).", HTTPStatus.NOT_FOUND)
         except ValueError as err:
             return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
-        return self.json(state)
+        return self.json(_for_user(request, state))
 
 
 class EventScoutSourcesView(_ScoutView):
