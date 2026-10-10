@@ -170,3 +170,26 @@ async def test_json_file_storage_round_trip(tmp_path):
     (tmp_path / "data" / "config.json").write_text("{broken", encoding="utf-8")
     assert await storage.load_config() is None
     assert (tmp_path / "data" / "config.damaged.json").exists()
+
+
+def test_explain_adds_the_likely_fix():
+    from scout.errors import explain
+
+    assert "openrouter.ai/settings/keys" in explain(OpenRouterError("OpenRouter spending limit reached or no credits left (HTTP 402)."))
+    assert "billing" in explain(OpenRouterError("Gemini returned HTTP 400: Google Search grounding is not available on the free tier"), provider="gemini")
+    assert "“bad-model”" in explain(OpenRouterError("OpenRouter returned HTTP 400: bad-model is not a valid model ID"), model="bad-model")
+    assert "midnight Pacific" in explain(OpenRouterError("Gemini rate limit or quota reached: x"), provider="gemini")
+    assert explain(OpenRouterError("something odd")) == "something odd"
+
+
+async def test_debug_info_has_no_keys_or_coordinates():
+    from scout.engine import debug_info
+
+    async with aiohttp.ClientSession() as session:
+        engine, _ = await make_engine(session, FakeLLM(SEARCH))
+        await scan(engine)
+    info = debug_info(engine, home_assistant="2026.10")
+    text = str(info)
+    assert info["keys_set"] == {"gemini_search_key": True, "api_key": True}
+    assert "'k'" not in text and "45.0461" not in text
+    assert info["last_run"]["status"] == "ok" and info["events"]["picks"] == 2 and info["home_assistant"] == "2026.10"

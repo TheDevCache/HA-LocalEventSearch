@@ -86,6 +86,44 @@ function changeText(was = {}, now = {}) {
   return parts.join(", ");
 }
 
+const ymd = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+
+function googleCalendarUrl(e) {
+  let dates;
+  if (e.all_day) {
+    const start = parseStart(e.start.slice(0, 10));
+    const last = parseStart((e.end || e.start).slice(0, 10));
+    last.setDate(last.getDate() + 1); // Google's end date is exclusive
+    dates = `${ymd(start)}/${ymd(last)}`;
+  } else {
+    const utc = (d) => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    const start = new Date(e.start);
+    const end = e.end ? new Date(e.end) : new Date(start.getTime() + 2 * 3600e3);
+    dates = `${utc(start)}/${utc(end > start ? end : new Date(start.getTime() + 2 * 3600e3))}`;
+  }
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: e.title,
+    dates,
+    details: [e.summary, e.url].filter(Boolean).join("\n\n"),
+    location: [e.venue, e.address || e.town].filter(Boolean).join(", "),
+  });
+  return `https://calendar.google.com/calendar/render?${params}`;
+}
+
+// Copy text; falls back to selecting an input when the clipboard API is unavailable (plain http).
+async function copyText(text, input) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    if (!input) return false;
+    input.focus();
+    input.select();
+    try { return document.execCommand("copy"); } catch (_) { return false; }
+  }
+}
+
 const money = (value) => (typeof value === "number" ? `$${value.toFixed(2)}` : "–");
 
 class LocalEventScoutPanel extends HTMLElement {
@@ -392,13 +430,44 @@ class LocalEventScoutPanel extends HTMLElement {
             ${action("like", e.status === "like" ? "mdi:thumb-up" : "mdi:thumb-up-outline", "Interested", e.status === "like")}
             ${action("dislike", e.status === "dislike" ? "mdi:thumb-down" : "mdi:thumb-down-outline", "Not for me (teaches future searches)", e.status === "dislike")}
             ${action("dismiss", e.status === "dismiss" ? "mdi:eye-off" : "mdi:eye-off-outline", "Hide (no effect on future searches)", e.status === "dismiss")}
+            <button class="icon ${this._adding === e.id ? "on" : ""}" title="Add to calendar" data-action="add-open" data-id="${esc(e.id)}">
+              <ha-icon icon="mdi:calendar-plus"></ha-icon></button>
             <button class="icon ${this._reporting === e.id ? "on" : ""}" title="Report wrong info" data-action="report-open" data-id="${esc(e.id)}">
               <ha-icon icon="${(e.reports || []).length ? "mdi:flag" : "mdi:flag-outline"}"></ha-icon></button>
             </span>
           </div>
+          ${this._adding === e.id ? this._addHtml(e) : ""}
           ${this._reporting === e.id ? this._reportFormHtml(e) : ""}
         </div>
       </article>`;
+  }
+
+  _feedUrl(suffix = ".ics") {
+    return `${window.location.origin}/api/${API}/calendar/${this._state.calendar_token}${suffix}`;
+  }
+
+  _addHtml(e) {
+    return `<div class="add-cal">
+      <a href="${esc(googleCalendarUrl(e))}" target="_blank" rel="noreferrer noopener">Google Calendar</a>
+      <a href="${esc(this._feedUrl(`/${encodeURIComponent(e.id)}.ics`))}" download="${esc(e.title.replace(/[^\w .-]+/g, "").slice(0, 60) || "event")}.ics">Download .ics (Outlook, Apple Calendar)</a>
+    </div>`;
+  }
+
+  _calendarHtml() {
+    if (!this._state.calendar_token) return "";
+    const row = (id, label, url) => `
+      <div class="row feed"><label>${label}<input id="${id}" readonly value="${esc(url)}"></label>
+        <button class="secondary small-btn" data-action="copy-feed" data-target="${id}">Copy</button></div>`;
+    return `
+      <div class="card">
+        <h2>Calendar feed</h2>
+        <p class="muted">Subscribe to your picks from a calendar app (in Outlook or Apple Calendar: add a calendar from the internet / subscription). It updates every few hours. Google Calendar fetches the feed from Google's servers, so it only works if this address is reachable from the internet, for example through Home Assistant Cloud remote access. Anyone with the link can see the events, so treat it like a password.</p>
+        ${row("feed-picks", "Picks and liked events", this._feedUrl())}
+        ${row("feed-liked", "Liked events only", this._feedUrl(".ics?only=liked"))}
+        <p class="muted small" id="feed-note">${esc(this._feedNote || "")}</p>
+        <button class="secondary" data-action="new-feed-link">Make a new link</button>
+        <span class="muted small">The old link stops working.</span>
+      </div>`;
   }
 
   _reportedHtml(e) {
@@ -608,9 +677,13 @@ class LocalEventScoutPanel extends HTMLElement {
 
         ${this._sourcesHtml(bucketOptions)}
 
+        ${this._calendarHtml()}
+
         ${this._reportsHtml()}
 
         ${this._usageHtml()}
+
+        ${this._troubleHtml()}
 
         <div class="save-bar">
           <span class="muted" id="dirty">${this._dirty ? "Unsaved changes" : ""}</span>
@@ -670,6 +743,41 @@ class LocalEventScoutPanel extends HTMLElement {
           <tbody>${rows}</tbody>
         </table></div>
       </div>`;
+  }
+
+  _troubleHtml() {
+    return `
+      <div class="card">
+        <h2>Troubleshooting</h2>
+        <p class="muted">Something not working? Copy the debug info and paste it into a bug report:
+          <a href="https://github.com/TheDevCache/HA-LocalEventSearch/issues" target="_blank" rel="noreferrer noopener">open an issue</a>
+          or email TheDevCache@gmail.com. It contains your settings (including your towns and interests) and the last few searches, but never your API keys.</p>
+        <button class="secondary" data-action="debug" ${this._debugBusy ? "disabled" : ""}>${this._debugBusy ? "Collecting…" : "Copy debug info"}</button>
+        ${this._debugText ? `<textarea id="debug-text" rows="10" readonly>${esc(this._debugText)}</textarea>
+          <p class="muted small">${esc(this._debugCopied || "")}</p>` : ""}
+      </div>`;
+  }
+
+  async _debug() {
+    this._error = "";
+    this._debugBusy = true;
+    if (this._dirty) this._draft = this._collect();
+    this._renderBody();
+    try {
+      const info = await this._api("GET", "debug");
+      this._debugText = JSON.stringify(info, null, 2);
+    } catch (err) {
+      this._error = err.message;
+      this._renderHeader();
+    }
+    this._debugBusy = false;
+    this._debugCopied = "";
+    this._renderBody();
+    if (!this._debugText) return;
+    const copied = await copyText(this._debugText, this.shadowRoot.getElementById("debug-text"));
+    this._debugCopied = copied ? "Copied to the clipboard." : "Couldn't copy automatically: click in the box, press Ctrl+A, then Ctrl+C.";
+    const note = this.shadowRoot.querySelector("#debug-text + p");
+    if (note) note.textContent = this._debugCopied;
   }
 
   _testHtml() {
@@ -771,6 +879,23 @@ class LocalEventScoutPanel extends HTMLElement {
       this._renderBody();
     } else if (action === "feedback") {
       await this._feedback(target.dataset.id, target.dataset.verdict);
+    } else if (action === "add-open") {
+      this._adding = this._adding === target.dataset.id ? null : target.dataset.id;
+      this._renderBody();
+    } else if (action === "copy-feed") {
+      const input = this.shadowRoot.getElementById(target.dataset.target);
+      const ok = await copyText(input.value, input);
+      const note = this.shadowRoot.getElementById("feed-note");
+      this._feedNote = ok ? "Link copied." : "Couldn't copy automatically: select the link and press Ctrl+C.";
+      if (note) note.textContent = this._feedNote;
+    } else if (action === "new-feed-link") {
+      try {
+        this._feedNote = "New link made. Update any calendar that used the old one.";
+        this._setState(await this._api("POST", "calendar/new_link", {}));
+      } catch (err) {
+        this._error = err.message;
+        this._renderHeader();
+      }
     } else if (action === "report-open") {
       this._reporting = this._reporting === target.dataset.id ? null : target.dataset.id;
       this._reportDraft = null;
@@ -786,6 +911,8 @@ class LocalEventScoutPanel extends HTMLElement {
       await this._report(target.dataset.id, { undo: true });
     } else if (action === "save") {
       await this._save();
+    } else if (action === "debug") {
+      await this._debug();
     } else if (action === "test-search") {
       await this._testSearch();
     } else if (action === "source-add") {
@@ -932,6 +1059,12 @@ const STYLES = `
   form.report .hint { margin: 0; }
   .form-actions { display: flex; gap: 8px; }
   .form-actions button { margin: 0; }
+  .add-cal { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 14px; }
+  .add-cal a { color: var(--primary-color) !important; text-decoration: underline !important; }
+  .feed label { flex: 1 1 320px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--secondary-text-color); }
+  .feed input { width: 100%; font-family: monospace; font-size: 12px; }
+  .feed button { align-self: flex-end; }
+  #debug-text { margin-top: 10px; font-family: monospace; font-size: 12px; }
   ul.reports { margin: 0; padding-left: 18px; }
   ul.reports li { margin: 8px 0; line-height: 1.4; }
   .empty { padding: 40px 0; text-align: center; color: var(--secondary-text-color); }

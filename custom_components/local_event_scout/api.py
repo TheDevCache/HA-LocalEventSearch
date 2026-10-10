@@ -11,7 +11,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from .const import API_FEEDBACK, API_REPORT, API_RUN, API_SOURCES, API_STATE, API_TEST_SEARCH, DOMAIN, FEEDBACK_VERDICTS
+from .const import API_CALENDAR, API_DEBUG, API_FEEDBACK, API_REPORT, API_RUN, API_SOURCES, API_STATE, API_TEST_SEARCH, DOMAIN, FEEDBACK_VERDICTS
 
 
 def _coordinator(hass: HomeAssistant):
@@ -149,7 +149,66 @@ class EventScoutTestSearchView(_ScoutView):
         return self.json(await self._get(request).async_test_search())
 
 
+class EventScoutDebugView(_ScoutView):
+    """Settings, recent runs and errors for a bug report (no API keys)."""
+
+    url = API_DEBUG
+    name = f"api:{DOMAIN}:debug"
+
+    async def get(self, request: web.Request) -> web.Response:
+        self._require_admin(request)
+        return self.json(self._get(request).debug_info())
+
+
+class EventScoutCalendarFeedView(_ScoutView):
+    """The .ics feed. Calendar apps can't log in, so the link carries a secret token instead."""
+
+    url = API_CALENDAR + "/{token}.ics"
+    name = f"api:{DOMAIN}:calendar_feed"
+    requires_auth = False
+
+    async def get(self, request: web.Request, token: str) -> web.Response:
+        body = self._get(request).engine.calendar_feed(token, request.query.get("only", ""))
+        if body is None:
+            raise web.HTTPNotFound
+        return web.Response(text=body, content_type="text/calendar", charset="utf-8", headers={"Cache-Control": "no-cache"})
+
+
+class EventScoutEventIcsView(_ScoutView):
+    """One event as an .ics file, for "Add to calendar"."""
+
+    url = API_CALENDAR + "/{token}/{event_id}.ics"
+    name = f"api:{DOMAIN}:calendar_event"
+    requires_auth = False
+
+    async def get(self, request: web.Request, token: str, event_id: str) -> web.Response:
+        body = self._get(request).engine.event_ics(token, event_id)
+        if body is None:
+            raise web.HTTPNotFound
+        return web.Response(
+            text=body,
+            content_type="text/calendar",
+            charset="utf-8",
+            headers={"Content-Disposition": 'attachment; filename="event.ics"'},
+        )
+
+
+class EventScoutCalendarTokenView(_ScoutView):
+    """Make a new calendar feed link (the old one stops working)."""
+
+    url = API_CALENDAR + "/new_link"
+    name = f"api:{DOMAIN}:calendar_token"
+
+    async def post(self, request: web.Request) -> web.Response:
+        self._require_admin(request)
+        return self.json(await self._get(request).async_new_calendar_token())
+
+
 def async_register_views(hass: HomeAssistant) -> None:
+    hass.http.register_view(EventScoutDebugView)
+    hass.http.register_view(EventScoutCalendarTokenView)
+    hass.http.register_view(EventScoutCalendarFeedView)
+    hass.http.register_view(EventScoutEventIcsView)
     hass.http.register_view(EventScoutTestSearchView)
     hass.http.register_view(EventScoutSourcesView)
     hass.http.register_view(EventScoutStateView)

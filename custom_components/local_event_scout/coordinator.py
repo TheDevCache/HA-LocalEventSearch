@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY
+from homeassistant.const import CONF_API_KEY, __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -30,7 +30,7 @@ from .const import (
     PROVIDER_OPENROUTER,
     SIGNAL_UPDATE,
 )
-from .scout.engine import ScoutEngine, empty_results
+from .scout.engine import ScoutEngine, debug_info, empty_results
 from .scout.models import DEFAULT_BUCKET_ID
 
 _LOGGER = logging.getLogger(__name__)
@@ -207,6 +207,18 @@ class EventScoutCoordinator:
 
     async def async_source_action(self, body: dict[str, Any]) -> dict[str, Any]:
         await self.engine.source_action(body)
+        return self.public_state()
+
+    def debug_info(self) -> dict[str, Any]:
+        return debug_info(
+            self.engine,
+            home_assistant=HA_VERSION,
+            weather_entities=len(self.hass.states.async_entity_ids("weather")),
+            scanning=self.engine.scanning,
+        )
+
+    async def async_new_calendar_token(self) -> dict[str, Any]:
+        await self.engine.new_calendar_token()
         return self.public_state()
 
     async def async_test_search(self) -> dict[str, Any]:

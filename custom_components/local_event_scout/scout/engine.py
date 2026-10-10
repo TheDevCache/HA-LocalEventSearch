@@ -13,12 +13,14 @@ import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import datetime, timedelta, timezone, tzinfo
 import logging
+import secrets
 from typing import Any
 from uuid import uuid4
 
 import aiohttp
 
 from . import reports as report_lib
+from .ics import build_calendar
 from .dates import in_window, parse_event_time
 from .defaults import (
     BUDGET_FLOOR,
@@ -92,6 +94,7 @@ def empty_results() -> dict[str, Any]:
         "geocode_cache": {},
         "gemini_search_api": "auto",  # which Gemini request style actually searches with this key
         "spend": None,
+        "calendar_token": "",  # secret part of the calendar feed link
     }
 
 
@@ -150,6 +153,9 @@ class ScoutEngine:
         for source in self.results["sources"]:
             if source.get("origin") != "manual":
                 source["name"] = host_of(source["url"])  # older versions named auto sources after a venue
+        if not self.results.get("calendar_token"):
+            self.results["calendar_token"] = secrets.token_urlsafe(24)
+            await self.save_results()
         self.prune()
 
     def now(self) -> datetime:
@@ -318,6 +324,7 @@ class ScoutEngine:
             "month_web_searches": self.month_web_searches(),
             "free_searches": GEMINI_FREE_SEARCHES if self.provider == PROVIDER_GEMINI else None,
             "next_due": self.next_due(),
+            "calendar_token": self.results.get("calendar_token", ""),
         } | extra
 
     def _this_month(self) -> list[dict[str, Any]]:
@@ -378,6 +385,39 @@ class ScoutEngine:
             for f in self.results["feedback"]
             if f.get("verdict") == verdict
         ]
+
+    # --------------------------------------------------------------- calendar
+
+    def _token_ok(self, token: str) -> bool:
+        expected = self.results.get("calendar_token") or ""
+        return bool(expected) and secrets.compare_digest(str(token), expected)
+
+    def calendar_feed(self, token: str, only: str = "") -> str | None:
+        """The picks (or only liked events) as an .ics feed; None when the token is wrong."""
+        if not self._token_ok(token):
+            return None
+        if only == "liked":
+            events = [e for e in self.upcoming_events() if e.get("status") == "like"]
+            name = "Event Scout: liked"
+        else:
+            events = self.picks()
+            ids = {e["id"] for e in events}
+            events += [e for e in self.upcoming_events() if e.get("status") == "like" and e["id"] not in ids]
+            name = "Event Scout picks"
+        return build_calendar(events, name, datetime.now(timezone.utc))
+
+    def event_ics(self, token: str, event_id: str) -> str | None:
+        if not self._token_ok(token):
+            return None
+        event = self.results["events"].get(event_id)
+        return build_calendar([event], event["title"], datetime.now(timezone.utc)) if event else None
+
+    async def new_calendar_token(self) -> dict[str, Any]:
+        """Replace the feed link; anyone using the old one stops getting updates."""
+        self.results["calendar_token"] = secrets.token_urlsafe(24)
+        await self.save_results()
+        self.notify()
+        return self.public_state()
 
     # ---------------------------------------------------------------- reports
 
@@ -833,6 +873,40 @@ class ScoutEngine:
         self.results["reports"] = [r for r in self.results["reports"] if not report_lib.expired(r, now)]
         if len(self.results["geocode_cache"]) > 2000:
             self.results["geocode_cache"] = dict(list(self.results["geocode_cache"].items())[-1000:])
+
+
+def debug_info(engine: "ScoutEngine", **host_details: Any) -> dict[str, Any]:
+    """A snapshot for bug reports: settings, last runs, sources and errors. Never includes keys."""
+    cfg = dict(engine.config)
+    cfg["locations"] = [{k: loc.get(k) for k in ("city", "region", "country")} for loc in cfg["locations"]]
+    events = list(engine.results["events"].values())
+    statuses: dict[str, int] = {}
+    for event in events:
+        statuses[event.get("status", "new")] = statuses.get(event.get("status", "new"), 0) + 1
+    history_keys = ("started", "status", "error", "note", "searches", "web_searches", "pages_read", "cost", "candidates", "kept", "new", "dropped")
+    return {
+        "app": "Local Event Scout",
+        "version": VERSION,
+        "host": engine.host,
+        "provider": engine.provider,
+        "keys_set": {k: bool(v) for k, v in engine._keys.items()},  # noqa: SLF001 - only whether they exist
+        "time_zone": engine.tz_name,
+        "generated": engine.now().isoformat(),
+        "settings": cfg,
+        "events": {"stored": len(events), "upcoming": len(engine.upcoming_events()), "picks": len(engine.picks()), "by_status": statuses},
+        "next_due": engine.next_due(),
+        "gemini_search_api": engine.results.get("gemini_search_api"),
+        "spend": engine.results.get("spend"),
+        "month": {"cost": engine.month_cost(), "web_searches": engine.month_web_searches()},
+        "last_run": engine.results.get("last_run"),
+        "recent_runs": [{k: r.get(k) for k in history_keys if k in r} for r in engine.results["run_history"][-10:]],
+        "sources": [
+            {k: s.get(k) for k in ("url", "bucket", "origin", "enabled", "misses", "last_found", "found_total", "last_checked", "last_error", "paused_reason", "reports")}
+            for s in engine.results["sources"]
+        ],
+        "reports": engine.results["reports"][-10:],
+        "feedback": {v: sum(1 for f in engine.results["feedback"] if f.get("verdict") == v) for v in ("like", "dislike")},
+    } | host_details
 
 
 def clean_words(values: Any) -> list[str]:
