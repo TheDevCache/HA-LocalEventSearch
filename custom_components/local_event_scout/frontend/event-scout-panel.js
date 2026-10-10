@@ -694,7 +694,7 @@ class LocalEventScoutPanel extends HTMLElement {
 
   _sourcesHtml(bucketOptions) {
     const sources = this._state.sources || [];
-    const origin = { manual: "Added by you", auto: "Found by search", liked: "From an event you liked" };
+    const origin = { manual: "Added by you", discovered: "From calendar search", auto: "Found by search", liked: "From an event you liked" };
     const status = (src) => {
       if (!src.enabled) return `<span class="warn-text">Paused${src.paused_reason ? `: ${esc(src.paused_reason)}` : ""}</span>`;
       if (!src.last_checked) return "Not checked yet";
@@ -717,6 +717,7 @@ class LocalEventScoutPanel extends HTMLElement {
         <h2>Saved sources</h2>
         <p class="muted">Event pages that are read directly on each run: no web-search fee, just a little model use. Once a group has two working sources, the full web search for it only runs every few days (see Search options). Sources that keep coming up empty are paused automatically. Changes here apply right away.</p>
         <div class="sources">${sources.map(row).join("") || '<p class="muted">None yet. They are added automatically when a search finds a good event on a venue or organiser page, or you can add one below.</p>'}</div>
+        ${this._discoverHtml(bucketOptions)}
         <div class="row add-source">
           <input id="source-url" placeholder="https://venue.example/events">
           <select id="source-bucket">${bucketOptions("local")}</select>
@@ -743,6 +744,83 @@ class LocalEventScoutPanel extends HTMLElement {
           <tbody>${rows}</tbody>
         </table></div>
       </div>`;
+  }
+
+  _discoverHtml(bucketOptions) {
+    const city = (this._state.config.locations[0] || {}).city;
+    if (!city) return '<p class="muted small">Add your location to find its event calendars automatically.</p>';
+    const cost = this._state.provider === "gemini" ? "one free Google search" : "one web search, about 1–2¢";
+    const labels = { good: "Works well", ok: "Readable", weak: "May not work", broken: "Couldn't load" };
+    const list = this._discovered || [];
+    const rows = list.map((src, i) => `
+      <div class="disc ${src.rating}">
+        <input type="checkbox" data-disc="${i}" ${src.checked ? "checked" : ""} ${src.rating === "broken" ? "disabled" : ""} aria-label="Save ${esc(src.name)}">
+        <div class="disc-main">
+          <a href="${esc(src.url)}" target="_blank" rel="noreferrer noopener">${esc(src.name)}</a>
+          <span class="badge ${src.rating}">${labels[src.rating] || ""}</span>
+          <div class="muted small">${esc([src.covers, src.note].filter(Boolean).join(" · "))}</div>
+        </div>
+        <select data-disc-bucket="${i}" ${src.rating === "broken" ? "disabled" : ""}>${bucketOptions(src.bucket || "local")}</select>
+      </div>`).join("");
+    return `
+      <div class="discover">
+        <button class="secondary" data-action="discover" ${this._discovering ? "disabled" : ""}>
+          ${this._discovering ? "Searching…" : `Find event calendars for ${esc(city)}`}</button>
+        <span class="muted small">Searches for city, tourism, venue and news event listings (${cost}) and checks which ones Event Scout can read.</span>
+        ${this._discoverError ? `<p class="warn-text">${esc(this._discoverError)}</p>` : ""}
+        ${this._discovered && !list.length && !this._discoverError ? '<p class="muted">No new calendars found.</p>' : ""}
+        ${list.length ? `<div class="disc-list">${rows}</div>
+          <button class="primary" data-action="discover-save">Save selected</button>` : ""}
+      </div>`;
+  }
+
+  async _discover() {
+    this._error = "";
+    this._discoverError = "";
+    this._discovering = true;
+    this._discovered = null;
+    if (this._dirty) this._draft = this._collect();
+    this._renderBody();
+    try {
+      const found = await this._api("POST", "discover", {});
+      this._discoverError = found.error || "";
+      this._discovered = (found.sources || []).map((src) => ({ ...src, checked: ["good", "ok"].includes(src.rating), bucket: "local" }));
+    } catch (err) {
+      this._discoverError = err.message;
+    }
+    this._discovering = false;
+    this._renderBody();
+  }
+
+  _collectDiscovered() {
+    const list = this._discovered || [];
+    this.shadowRoot.querySelectorAll("[data-disc]").forEach((box) => { list[Number(box.dataset.disc)].checked = box.checked; });
+    this.shadowRoot.querySelectorAll("[data-disc-bucket]").forEach((sel) => { list[Number(sel.dataset.discBucket)].bucket = sel.value; });
+    return list.filter((src) => src.checked && src.rating !== "broken");
+  }
+
+  async _saveDiscovered() {
+    const chosen = this._collectDiscovered();
+    if (!chosen.length) {
+      this._discoverError = "Tick at least one page to save.";
+      this._renderBody();
+      return false;
+    }
+    try {
+      if (this._dirty) this._draft = this._collect();
+      this._setState(await this._api("POST", "sources", {
+        action: "add_many", sources: chosen.map(({ url, name, bucket }) => ({ url, name, bucket })),
+      }));
+      this._notice = `Saved ${chosen.length} source${chosen.length === 1 ? "" : "s"}. They're read on every search.`;
+      this._discovered = null;
+      this._renderBody();
+      this._renderHeader();
+      return true;
+    } catch (err) {
+      this._discoverError = err.message;
+      this._renderBody();
+      return false;
+    }
   }
 
   _troubleHtml() {
@@ -911,6 +989,10 @@ class LocalEventScoutPanel extends HTMLElement {
       await this._report(target.dataset.id, { undo: true });
     } else if (action === "save") {
       await this._save();
+    } else if (action === "discover") {
+      await this._discover();
+    } else if (action === "discover-save") {
+      await this._saveDiscovered();
     } else if (action === "debug") {
       await this._debug();
     } else if (action === "test-search") {
@@ -1064,6 +1146,18 @@ const STYLES = `
   .feed label { flex: 1 1 320px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--secondary-text-color); }
   .feed input { width: 100%; font-family: monospace; font-size: 12px; }
   .feed button { align-self: flex-end; }
+  .discover { margin: 14px 0 6px; padding-top: 12px; border-top: 1px solid var(--divider-color); }
+  .discover > button { margin: 0 10px 0 0; }
+  .disc-list { margin: 10px 0; }
+  .disc { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--divider-color); }
+  .disc.broken { opacity: .55; }
+  .disc-main { flex: 1; min-width: 0; }
+  .disc-main a { color: var(--primary-text-color); }
+  .disc select { flex: 0 0 auto; max-width: 180px; }
+  .badge { font-size: 11px; border-radius: 8px; padding: 1px 7px; margin-left: 6px; background: var(--secondary-background-color); color: var(--secondary-text-color); white-space: nowrap; }
+  .badge.good { background: var(--success-color, #43a047); color: #fff; }
+  .badge.weak { background: var(--warning-color, #ffa600); color: #000; }
+  .badge.broken { background: var(--error-color, #db4437); color: #fff; }
   #debug-text { margin-top: 10px; font-family: monospace; font-size: 12px; }
   ul.reports { margin: 0; padding-left: 18px; }
   ul.reports li { margin: 8px 0; line-height: 1.4; }

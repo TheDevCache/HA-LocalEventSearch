@@ -27,6 +27,8 @@ API_TEST_SEARCH = f"{API_BASE}/test_search"
 API_REPORT = f"{API_BASE}/report"
 API_DEBUG = f"{API_BASE}/debug"
 API_CALENDAR = f"{API_BASE}/calendar"
+API_DISCOVER = f"{API_BASE}/discover"
+API_SETUP = f"{API_BASE}/setup"
 
 PANEL_URL = DOMAIN
 PANEL_COMPONENT = "local-event-scout-panel"

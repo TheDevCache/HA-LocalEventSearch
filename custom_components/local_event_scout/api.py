@@ -11,7 +11,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from .const import API_CALENDAR, API_DEBUG, API_FEEDBACK, API_REPORT, API_RUN, API_SOURCES, API_STATE, API_TEST_SEARCH, DOMAIN, FEEDBACK_VERDICTS
+from .const import API_CALENDAR, API_DEBUG, API_DISCOVER, API_FEEDBACK, API_REPORT, API_RUN, API_SOURCES, API_STATE, API_TEST_SEARCH, DOMAIN, FEEDBACK_VERDICTS
 
 
 def _coordinator(hass: HomeAssistant):
@@ -204,7 +204,22 @@ class EventScoutCalendarTokenView(_ScoutView):
         return self.json(await self._get(request).async_new_calendar_token())
 
 
+class EventScoutDiscoverView(_ScoutView):
+    """Search for the town's event calendars (one web search)."""
+
+    url = API_DISCOVER
+    name = f"api:{DOMAIN}:discover"
+
+    async def post(self, request: web.Request) -> web.Response:
+        self._require_admin(request)
+        try:
+            return self.json(await self._get(request).async_discover())
+        except ValueError as err:
+            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+
+
 def async_register_views(hass: HomeAssistant) -> None:
+    hass.http.register_view(EventScoutDiscoverView)
     hass.http.register_view(EventScoutDebugView)
     hass.http.register_view(EventScoutCalendarTokenView)
     hass.http.register_view(EventScoutCalendarFeedView)

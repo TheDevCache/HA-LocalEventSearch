@@ -22,6 +22,7 @@ import aiohttp
 from . import reports as report_lib
 from .ics import build_calendar
 from .dates import in_window, parse_event_time
+from .discover import discover_sources
 from .defaults import (
     BUDGET_FLOOR,
     DEFAULT_GEMINI_MODEL,
@@ -496,7 +497,16 @@ class ScoutEngine:
     async def source_action(self, body: dict[str, Any]) -> dict[str, Any]:
         action = body.get("action")
         url = str(body.get("url") or "").strip()
-        if action == "add":
+        if action == "add_many":
+            added = 0
+            for item in body.get("sources") or []:
+                if isinstance(item, dict) and self.add_source(
+                    str(item.get("url") or ""), str(item.get("bucket") or DEFAULT_BUCKET_ID), str(item.get("name") or ""), "discovered"
+                ):
+                    added += 1
+            if not added:
+                raise ValueError("Nothing was added (already saved, or the source list is full).")
+        elif action == "add":
             if not normalize_url(url):
                 raise ValueError("Enter a full web address starting with http:// or https://.")
             if self.find_source(url):
@@ -639,6 +649,43 @@ class ScoutEngine:
             },
             "working": "openrouter" if searched else None,
         }
+
+    # --------------------------------------------------------------- discovery
+
+    async def discover(self) -> dict[str, Any]:
+        """Search for the town's event calendars and check which ones Event Scout can read."""
+        if not self.config["locations"]:
+            raise ValueError("Add your location first.")
+        profile = self.profile()
+        started = self.now()
+        try:
+            found = await discover_sources(
+                self.session,
+                self.llm(),
+                today=started.date(),
+                location_text=profile.locations[0].text,
+                interests=profile.interests,
+                known_urls=[s["url"] for s in self.results["sources"]],
+            )
+        except OpenRouterError as err:
+            return {"sources": [], "error": self.explain(err)}
+        # Count it towards this month's spending and searches.
+        self.results["run_history"] = (
+            self.results["run_history"]
+            + [
+                {
+                    "started": started.isoformat(),
+                    "kind": "discover",
+                    "status": "error" if found.error else "ok",
+                    "searches": 1,
+                    "web_searches": found.usage.get("web_searches") or 0,
+                    "cost": round(found.cost, 5),
+                }
+            ]
+        )[-MAX_RUN_HISTORY:]
+        await self.save_results()
+        self.notify()
+        return {"sources": found.sources, "error": found.error, "cost": found.cost}
 
     # ------------------------------------------------------------------- scan
 
